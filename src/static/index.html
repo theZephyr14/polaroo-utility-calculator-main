@@ -435,27 +435,68 @@
             processBtn.disabled = true;
             processBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Processing Invoices...';
             
+            // Clear previous results
+            clearInvoiceResults();
+            
+            // List of first 10 properties
+            const properties = [
+                "Aribau 1º 1ª", "Aribau 1º 2ª", "Aribau 2º 1º", "Aribau 2º 2º", "Aribau 2º 3ª",
+                "Aribau 126-128 3-1", "Aribau 3º 2ª", "Aribau 4º 1ª", "Aribau 4º 1ª B", "Aribau 4º 2ª"
+            ];
+            
+            let results = [];
+            let successful = 0;
+            let failed = 0;
+            
             try {
-                const response = await fetch('/api/process-first-10', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
+                // Process each property one by one
+                for (let i = 0; i < properties.length; i++) {
+                    const property = properties[i];
+                    
+                    // Update progress
+                    processBtn.innerHTML = `<i class="fas fa-spinner fa-spin me-2"></i>Processing ${i+1}/10: ${property}`;
+                    
+                    try {
+                        const response = await fetch('/api/process-property', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({ property_name: property })
+                        });
+                        
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+                        
+                        const result = await response.json();
+                        
+                        if (result.success) {
+                            results.push(result.data);
+                            successful++;
+                            // Update UI with this property's result immediately
+                            addPropertyResult(result.data);
+                        } else {
+                            throw new Error(result.error || 'Property processing failed');
+                        }
+                        
+                    } catch (error) {
+                        console.error(`Error processing ${property}:`, error);
+                        results.push({
+                            property_name: property,
+                            error: error.message,
+                            total_cost: 0,
+                            overuse: 0
+                        });
+                        failed++;
+                        // Add error row to UI
+                        addPropertyError(property, error.message);
                     }
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
                 }
                 
-                const result = await response.json();
-                
-                if (result.success) {
-                    currentData = result.data;
-                    updateInvoiceUI(result.data);
-                    showSuccessMessage(`Invoice processing completed! Processed ${result.data.successful_properties}/${result.data.total_properties} properties successfully.`);
-                } else {
-                    throw new Error(result.error || 'Invoice processing failed');
-                }
+                // Update final summary
+                updateInvoiceSummary(results, successful, failed);
+                showSuccessMessage(`Invoice processing completed! Processed ${successful}/${properties.length} properties successfully.`);
                 
             } catch (error) {
                 console.error('Error processing invoices:', error);
@@ -468,43 +509,95 @@
             }
         }
         
-        function updateInvoiceUI(data) {
-            // Update summary cards with invoice data
-            const totalElec = data.properties.reduce((sum, prop) => sum + (prop.total_electricity || 0), 0);
-            const totalWater = data.properties.reduce((sum, prop) => sum + (prop.total_water || 0), 0);
-            const totalExtra = data.properties.reduce((sum, prop) => sum + (prop.overuse || 0), 0);
+        function clearInvoiceResults() {
+            // Clear the table body
+            const tbody = document.querySelector('#overviewTableBody');
+            if (tbody) {
+                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Processing properties...</td></tr>';
+            }
+            
+            // Reset summary cards
+            document.getElementById('totalElecCost').textContent = '€0.00';
+            document.getElementById('totalWaterCost').textContent = '€0.00';
+            document.getElementById('totalExtra').textContent = '€0.00';
+            document.getElementById('totalProperties').textContent = '0';
+        }
+        
+        function addPropertyResult(property) {
+            const tbody = document.querySelector('#overviewTableBody');
+            if (!tbody) return;
+            
+            // Remove the "Processing..." row if it exists
+            const processingRow = tbody.querySelector('td[colspan="6"]');
+            if (processingRow) {
+                processingRow.parentElement.remove();
+            }
+            
+            const row = document.createElement('tr');
+            if (property.overuse > 0) {
+                row.classList.add('overage-row');
+            }
+            
+            row.innerHTML = `
+                <td>${property.property_name}</td>
+                <td>€${(property.allowance || 0).toFixed(2)}</td>
+                <td>€${(property.total_electricity || 0).toFixed(2)}</td>
+                <td>€${(property.total_water || 0).toFixed(2)}</td>
+                <td>€${(property.total_cost || 0).toFixed(2)}</td>
+                <td>€${(property.overuse || 0).toFixed(2)}</td>
+            `;
+            tbody.appendChild(row);
+            
+            // Update summary cards
+            updateSummaryCards();
+        }
+        
+        function addPropertyError(propertyName, errorMessage) {
+            const tbody = document.querySelector('#overviewTableBody');
+            if (!tbody) return;
+            
+            // Remove the "Processing..." row if it exists
+            const processingRow = tbody.querySelector('td[colspan="6"]');
+            if (processingRow) {
+                processingRow.parentElement.remove();
+            }
+            
+            const row = document.createElement('tr');
+            row.classList.add('table-danger');
+            
+            row.innerHTML = `
+                <td>${propertyName}</td>
+                <td colspan="5" class="text-danger">Error: ${errorMessage}</td>
+            `;
+            tbody.appendChild(row);
+        }
+        
+        function updateSummaryCards() {
+            const tbody = document.querySelector('#overviewTableBody');
+            if (!tbody) return;
+            
+            const rows = tbody.querySelectorAll('tr:not(.table-danger)');
+            let totalElec = 0, totalWater = 0, totalExtra = 0, count = 0;
+            
+            rows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+                if (cells.length >= 6) {
+                    totalElec += parseFloat(cells[2].textContent.replace('€', '')) || 0;
+                    totalWater += parseFloat(cells[3].textContent.replace('€', '')) || 0;
+                    totalExtra += parseFloat(cells[5].textContent.replace('€', '')) || 0;
+                    count++;
+                }
+            });
             
             document.getElementById('totalElecCost').textContent = `€${totalElec.toFixed(2)}`;
             document.getElementById('totalWaterCost').textContent = `€${totalWater.toFixed(2)}`;
             document.getElementById('totalExtra').textContent = `€${totalExtra.toFixed(2)}`;
-            document.getElementById('totalProperties').textContent = data.successful_properties;
-            
-            // Update properties table
-            const tbody = document.querySelector('#propertiesTable tbody');
-            tbody.innerHTML = '';
-            
-            data.properties.forEach(property => {
-                const row = document.createElement('tr');
-                if (property.overuse > 0) {
-                    row.classList.add('overage-row');
-                }
-                
-                row.innerHTML = `
-                    <td>${property.property_name}</td>
-                    <td>€${(property.total_electricity || 0).toFixed(2)}</td>
-                    <td>€${(property.total_water || 0).toFixed(2)}</td>
-                    <td>€${(property.overuse || 0).toFixed(2)}</td>
-                    <td>${property.room_count || 'N/A'} rooms</td>
-                    <td>€${(property.allowance || 0).toFixed(2)}</td>
-                    <td>
-                        ${property.llm_reasoning ? 
-                            `<span class="badge bg-info" title="${property.llm_reasoning}">LLM Analysis</span>` : 
-                            '<span class="badge bg-secondary">Standard</span>'
-                        }
-                    </td>
-                `;
-                tbody.appendChild(row);
-            });
+            document.getElementById('totalProperties').textContent = count;
+        }
+        
+        function updateInvoiceSummary(results, successful, failed) {
+            // This function is called at the end to update final summary
+            updateSummaryCards();
         }
         
         function updateUI(data) {

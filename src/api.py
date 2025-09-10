@@ -403,6 +403,39 @@ async def process_first_10_properties_endpoint():
             error=str(e)
         )
 
+@app.post("/api/process-property", response_model=CalculationResponse)
+async def process_single_property_endpoint(request: dict):
+    """
+    Process invoices for a single property and return results immediately.
+    This allows for real-time display of results.
+    """
+    try:
+        property_name = request.get("property_name")
+        if not property_name:
+            raise HTTPException(status_code=400, detail="property_name is required")
+        
+        print(f"🚀 [API] Starting invoice processing for: {property_name}")
+        
+        # Import the new invoice processing function
+        from src.polaroo_scrape import process_property_invoices
+        
+        # Process the single property
+        result = await process_property_invoices(property_name)
+        
+        return CalculationResponse(
+            success=True,
+            message=f"Invoice processing completed for {property_name}",
+            data=result
+        )
+        
+    except Exception as e:
+        print(f"❌ [API] Single property processing failed: {e}")
+        return CalculationResponse(
+            success=False,
+            message="Single property processing failed",
+            error=str(e)
+        )
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

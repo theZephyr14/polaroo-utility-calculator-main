@@ -337,13 +337,13 @@ async def _get_invoice_table_data(page) -> list[dict]:
     await page.wait_for_timeout(2000)
     
     # Find the table rows (skip header)
-    rows = page.locator('table tbody tr, .table tbody tr, [role="row"]').all()
+    rows = await page.locator('table tbody tr, .table tbody tr, [role="row"]').all()
     
     invoices = []
     for i, row in enumerate(rows):
         try:
             # Extract data from each column
-            cells = row.locator('td, th').all()
+            cells = await row.locator('td, th').all()
             if len(cells) < 10:  # Skip if not enough columns
                 continue
                 
@@ -379,33 +379,80 @@ async def _download_invoice_files(page, selected_invoices: list[dict], property_
     print(f"📥 [DOWNLOAD] Downloading {len(selected_invoices)} invoices for {property_name}")
     
     downloaded_files = []
+    context = page.context
+    
     for i, invoice in enumerate(selected_invoices):
         try:
             if invoice['download_button']:
                 print(f"📥 [DOWNLOAD] Downloading invoice {i+1}: {invoice['invoice_reference']}")
                 
+                # Listen for new page (Adobe Acrobat tab)
+                new_page_promise = context.wait_for_event("page")
+                
                 # Click the download button
-                async with page.expect_download() as dl_info:
-                    await invoice['download_button'].click()
-                dl = await dl_info.value
+                await invoice['download_button'].click()
+                
+                # Wait for new page to open
+                new_page = await new_page_promise
+                await new_page.wait_for_load_state("domcontentloaded")
+                
+                print(f"📄 [DOWNLOAD] New tab opened: {new_page.url}")
+                
+                # Wait for Adobe Acrobat to load
+                await new_page.wait_for_timeout(3000)
+                
+                # Look for download button in Adobe Acrobat viewer
+                download_selectors = [
+                    'button[title*="Download"]',
+                    'button[aria-label*="Download"]',
+                    'button:has-text("Download")',
+                    'a[title*="Download"]',
+                    'a[aria-label*="Download"]',
+                    'a:has-text("Download")',
+                    '[data-testid*="download"]',
+                    '.download-button',
+                    'button[class*="download"]'
+                ]
+                
+                download_button = None
+                for selector in download_selectors:
+                    try:
+                        download_button = new_page.locator(selector).first
+                        if await download_button.count() > 0 and await download_button.is_visible():
+                            print(f"✅ [DOWNLOAD] Found download button with selector: {selector}")
+                            break
+                    except:
+                        continue
+                
+                if not download_button or await download_button.count() == 0:
+                    print(f"⚠️ [DOWNLOAD] No download button found in Adobe Acrobat viewer")
+                    await new_page.close()
+                    continue
                 
                 # Generate filename
-                suggested = dl.suggested_filename or f"invoice_{invoice['invoice_reference']}.pdf"
-                stem = Path(suggested).stem
-                ext = Path(suggested).suffix or ".pdf"
                 ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                filename = f"{property_name}_{invoice['service']}_{invoice['invoice_reference']}_{ts}{ext}"
+                filename = f"{property_name}_{invoice['service']}_{invoice['invoice_reference']}_{ts}.pdf"
+                
+                # Click download button and wait for download
+                async with new_page.expect_download() as dl_info:
+                    await download_button.click()
+                dl = await dl_info.value
                 
                 # Save locally
                 local_path = Path("_debug/downloads") / filename
                 await dl.save_as(str(local_path))
                 
-                # Upload to Supabase
+                # Upload to Supabase with proper folder structure
                 data = local_path.read_bytes()
-                key = _upload_to_supabase_bytes(filename, data)
+                # Create folder structure: invoices/{property_name}/filename
+                supabase_filename = f"invoices/{property_name}/{filename}"
+                key = _upload_to_supabase_bytes(supabase_filename, data)
                 downloaded_files.append(key)
                 
                 print(f"✅ [DOWNLOAD] Downloaded and uploaded: {key}")
+                
+                # Close the Adobe Acrobat tab
+                await new_page.close()
                 
         except Exception as e:
             print(f"❌ [DOWNLOAD] Error downloading invoice {i+1}: {e}")
@@ -602,6 +649,9 @@ async def process_property_invoices(property_name: str) -> dict:
             
             room_count = ADDRESS_ROOM_MAPPING.get(property_name, 1)
             allowance = SPECIAL_LIMITS.get(property_name, ROOM_LIMITS.get(room_count, 50))
+            
+            # Double allowances for 2-month period
+            allowance *= 2
             
             total_cost = analysis['total_all']
             overuse = max(0, total_cost - allowance)
