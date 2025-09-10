@@ -321,6 +321,88 @@ async def get_configuration():
         "properties": USER_ADDRESSES
     }
 
+# ---------- New Invoice Processing Endpoints ----------
+@app.post("/api/process-invoices", response_model=CalculationResponse)
+async def process_invoices_for_property(request: dict):
+    """
+    Process invoices for a single property using the new invoice-focused workflow.
+    
+    Expected request body:
+    {
+        "property_name": "Aribau 1º 1ª"
+    }
+    """
+    try:
+        property_name = request.get("property_name")
+        if not property_name:
+            raise HTTPException(status_code=400, detail="property_name is required")
+        
+        print(f"🚀 [API] Starting invoice processing for: {property_name}")
+        
+        # Import the new invoice processing function
+        from src.polaroo_scrape import process_property_invoices
+        
+        # Process the property
+        result = await process_property_invoices(property_name)
+        
+        return CalculationResponse(
+            success=True,
+            message=f"Invoice processing completed for {property_name}",
+            data=result
+        )
+        
+    except Exception as e:
+        print(f"❌ [API] Invoice processing failed: {e}")
+        return CalculationResponse(
+            success=False,
+            message="Invoice processing failed",
+            error=str(e)
+        )
+
+@app.post("/api/process-first-10", response_model=CalculationResponse)
+async def process_first_10_properties_endpoint():
+    """
+    Process invoices for the first 10 properties in Book 1.
+    This is the main endpoint for testing the new workflow.
+    """
+    try:
+        print("🚀 [API] Starting invoice processing for first 10 properties...")
+        
+        # Import the new invoice processing function
+        from src.polaroo_scrape import process_first_10_properties
+        
+        # Process all properties
+        results = await process_first_10_properties()
+        
+        # Calculate summary
+        total_properties = len(results)
+        successful_properties = len([r for r in results if 'error' not in r])
+        total_cost = sum(r.get('total_cost', 0) for r in results)
+        total_overuse = sum(r.get('overuse', 0) for r in results)
+        
+        summary = {
+            "total_properties": total_properties,
+            "successful_properties": successful_properties,
+            "failed_properties": total_properties - successful_properties,
+            "total_cost": total_cost,
+            "total_overuse": total_overuse,
+            "properties": results
+        }
+        
+        return CalculationResponse(
+            success=True,
+            message=f"Processed {successful_properties}/{total_properties} properties successfully",
+            data=summary
+        )
+        
+    except Exception as e:
+        print(f"❌ [API] First 10 properties processing failed: {e}")
+        return CalculationResponse(
+            success=False,
+            message="First 10 properties processing failed",
+            error=str(e)
+        )
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

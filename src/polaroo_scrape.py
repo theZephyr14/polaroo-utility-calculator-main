@@ -281,6 +281,375 @@ async def _pick_download_excel(page):
     
     raise PWTimeout("Dropdown did not contain 'Download Excel' or 'Download CSV'.")
 
+# ---------- invoice-focused functions ----------
+async def _open_invoices_from_sidebar(page) -> None:
+    """Click the 'Invoices' item in the left sidebar to open the Invoices page."""
+    print("📋 [INVOICES] Looking for Invoices link in sidebar...")
+    candidates = [
+        page.get_by_role("link", name="Invoices"),
+        page.get_by_role("link", name=re.compile(r"\bInvoices\b", re.I)),
+        page.locator('a:has-text("Invoices")'),
+        page.locator('[role="navigation"] >> text=Invoices'),
+        page.locator('nav >> text=Invoices'),
+    ]
+    for i, loc in enumerate(candidates):
+        count = await loc.count()
+        print(f"🔍 [INVOICES] Candidate {i+1}: Found {count} elements")
+        if count:
+            btn = loc.first
+            if await btn.is_visible():
+                print("✅ [INVOICES] Found visible Invoices link, clicking...")
+                await btn.scroll_into_view_if_needed()
+                await _wait(page, "before clicking sidebar → Invoices")
+                await btn.click()
+                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_load_state("networkidle")
+                await _wait(page, "after landing on Invoices")
+                print(f"✅ [INVOICES] Successfully navigated to Invoices page: {page.url}")
+                return
+    raise PWTimeout("Could not click 'Invoices' in the sidebar.")
+
+async def _search_for_property(page, property_name: str) -> None:
+    """Search for a specific property in the search bar."""
+    print(f"🔍 [SEARCH] Searching for property: {property_name}")
+    
+    # Find the search input field
+    search_input = page.locator('input[type="text"], input[placeholder*="search" i], input[placeholder*="Search" i]').first
+    if await search_input.count() == 0:
+        # Try alternative selectors
+        search_input = page.locator('input').filter(has_text=re.compile(r"search", re.I)).first
+    
+    if await search_input.count() == 0:
+        raise PWTimeout("Search input field not found")
+    
+    # Clear and fill the search field
+    await search_input.click()
+    await search_input.fill("")  # Clear existing text
+    await search_input.fill(property_name)
+    await page.wait_for_timeout(1000)  # Wait for search to process
+    print(f"✅ [SEARCH] Successfully searched for: {property_name}")
+
+async def _get_invoice_table_data(page) -> list[dict]:
+    """Extract invoice table data for the current property."""
+    print("📊 [TABLE] Extracting invoice table data...")
+    
+    # Wait for table to load
+    await page.wait_for_timeout(2000)
+    
+    # Find the table rows (skip header)
+    rows = page.locator('table tbody tr, .table tbody tr, [role="row"]').all()
+    
+    invoices = []
+    for i, row in enumerate(rows):
+        try:
+            # Extract data from each column
+            cells = row.locator('td, th').all()
+            if len(cells) < 10:  # Skip if not enough columns
+                continue
+                
+            invoice_data = {
+                'row_index': i,
+                'asset': await cells[1].text_content() if len(cells) > 1 else "",
+                'upload_date': await cells[2].text_content() if len(cells) > 2 else "",
+                'modified_date': await cells[3].text_content() if len(cells) > 3 else "",
+                'issue_date': await cells[4].text_content() if len(cells) > 4 else "",
+                'payment_date': await cells[5].text_content() if len(cells) > 5 else "",
+                'account': await cells[6].text_content() if len(cells) > 6 else "",
+                'invoice_reference': await cells[7].text_content() if len(cells) > 7 else "",
+                'provider': await cells[8].text_content() if len(cells) > 8 else "",
+                'company': await cells[9].text_content() if len(cells) > 9 else "",
+                'service': await cells[11].text_content() if len(cells) > 11 else "",  # Service column
+                'initial_date': await cells[12].text_content() if len(cells) > 12 else "",  # Initial date
+                'final_date': await cells[13].text_content() if len(cells) > 13 else "",  # Final date
+                'subtotal': await cells[14].text_content() if len(cells) > 14 else "",  # Subtotal
+                'taxes': await cells[15].text_content() if len(cells) > 15 else "",  # Taxes
+                'total': await cells[16].text_content() if len(cells) > 16 else "",  # Total
+                'download_button': cells[0] if len(cells) > 0 else None,  # Download button (first column)
+            }
+            invoices.append(invoice_data)
+        except Exception as e:
+            print(f"⚠️ [TABLE] Error extracting row {i}: {e}")
+            continue
+    
+    print(f"✅ [TABLE] Extracted {len(invoices)} invoice records")
+    return invoices
+
+async def _download_invoice_files(page, selected_invoices: list[dict], property_name: str) -> list[str]:
+    """Download the selected invoice files and upload to Supabase."""
+    print(f"📥 [DOWNLOAD] Downloading {len(selected_invoices)} invoices for {property_name}")
+    
+    downloaded_files = []
+    for i, invoice in enumerate(selected_invoices):
+        try:
+            if invoice['download_button']:
+                print(f"📥 [DOWNLOAD] Downloading invoice {i+1}: {invoice['invoice_reference']}")
+                
+                # Click the download button
+                async with page.expect_download() as dl_info:
+                    await invoice['download_button'].click()
+                dl = await dl_info.value
+                
+                # Generate filename
+                suggested = dl.suggested_filename or f"invoice_{invoice['invoice_reference']}.pdf"
+                stem = Path(suggested).stem
+                ext = Path(suggested).suffix or ".pdf"
+                ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                filename = f"{property_name}_{invoice['service']}_{invoice['invoice_reference']}_{ts}{ext}"
+                
+                # Save locally
+                local_path = Path("_debug/downloads") / filename
+                await dl.save_as(str(local_path))
+                
+                # Upload to Supabase
+                data = local_path.read_bytes()
+                key = _upload_to_supabase_bytes(filename, data)
+                downloaded_files.append(key)
+                
+                print(f"✅ [DOWNLOAD] Downloaded and uploaded: {key}")
+                
+        except Exception as e:
+            print(f"❌ [DOWNLOAD] Error downloading invoice {i+1}: {e}")
+            continue
+    
+    return downloaded_files
+
+# ---------- Cohere LLM integration ----------
+def analyze_invoices_with_cohere(invoices: list[dict]) -> dict:
+    """
+    Use Cohere LLM to analyze invoices and select the right ones.
+    Returns selected invoices and calculation data.
+    """
+    print("🤖 [COHERE] Analyzing invoices with LLM...")
+    
+    try:
+        import cohere
+        from src.config import COHERE_API_KEY
+        
+        # Initialize Cohere client
+        co = cohere.Client(COHERE_API_KEY)
+        
+        # Prepare invoice data for LLM analysis
+        invoice_text = "Invoice Analysis Request:\n\n"
+        invoice_text += "I need to select the right invoices for utility bill calculation.\n"
+        invoice_text += "I need 2 electricity bills (monthly) and 1 water bill (every 2 months) from the last 3 months.\n\n"
+        invoice_text += "Available invoices:\n"
+        
+        for i, inv in enumerate(invoices):
+            invoice_text += f"Row {i+1}:\n"
+            invoice_text += f"  Service: {inv['service']}\n"
+            invoice_text += f"  Issue Date: {inv['issue_date']}\n"
+            invoice_text += f"  Initial Date: {inv['initial_date']}\n"
+            invoice_text += f"  Final Date: {inv['final_date']}\n"
+            invoice_text += f"  Total: {inv['total']}\n"
+            invoice_text += f"  Provider: {inv['provider']}\n\n"
+        
+        invoice_text += "\nPlease analyze these invoices and select:\n"
+        invoice_text += "1. The 2 most recent electricity bills (monthly billing)\n"
+        invoice_text += "2. The 1 most recent water bill (2-month billing period)\n"
+        invoice_text += "3. Calculate the total cost for each service type\n"
+        invoice_text += "4. Return the row numbers of selected invoices\n\n"
+        invoice_text += "Format your response as JSON with this structure:\n"
+        invoice_text += '{"selected_electricity_rows": [row_numbers], "selected_water_rows": [row_numbers], "reasoning": "explanation"}'
+        
+        # Call Cohere API
+        response = co.generate(
+            model='command',
+            prompt=invoice_text,
+            max_tokens=500,
+            temperature=0.1
+        )
+        
+        # Parse LLM response
+        llm_response = response.generations[0].text.strip()
+        print(f"🤖 [COHERE] LLM Response: {llm_response}")
+        
+        # Try to parse JSON response
+        import json
+        try:
+            analysis = json.loads(llm_response)
+            selected_electricity_rows = analysis.get('selected_electricity_rows', [])
+            selected_water_rows = analysis.get('selected_water_rows', [])
+            reasoning = analysis.get('reasoning', 'No reasoning provided')
+            
+            print(f"🤖 [COHERE] Selected electricity rows: {selected_electricity_rows}")
+            print(f"🤖 [COHERE] Selected water rows: {selected_water_rows}")
+            print(f"🤖 [COHERE] Reasoning: {reasoning}")
+            
+        except json.JSONDecodeError:
+            print("⚠️ [COHERE] Failed to parse JSON response, using fallback logic")
+            # Fallback to basic logic
+            selected_electricity_rows = []
+            selected_water_rows = []
+            reasoning = "JSON parsing failed, using fallback logic"
+    
+    except Exception as e:
+        print(f"⚠️ [COHERE] Error with Cohere API: {e}, using fallback logic")
+        selected_electricity_rows = []
+        selected_water_rows = []
+        reasoning = f"Cohere API error: {e}"
+    
+    # Fallback logic if LLM fails
+    if not selected_electricity_rows and not selected_water_rows:
+        print("🔄 [COHERE] Using fallback logic...")
+        
+        # Filter invoices by service type
+        electricity_invoices = [inv for inv in invoices if inv['service'].lower() == 'electricity']
+        water_invoices = [inv for inv in invoices if inv['service'].lower() == 'water']
+        
+        # Sort by issue date (most recent first)
+        electricity_invoices.sort(key=lambda x: x['issue_date'], reverse=True)
+        water_invoices.sort(key=lambda x: x['issue_date'], reverse=True)
+        
+        # Select 2 most recent electricity and 1 most recent water
+        selected_electricity = electricity_invoices[:2]
+        selected_water = water_invoices[:1]
+        
+        selected_invoices = selected_electricity + selected_water
+        reasoning = "Fallback logic: selected most recent invoices by service type"
+    
+    else:
+        # Use LLM selections
+        selected_invoices = []
+        
+        # Get electricity invoices by row numbers
+        for row_num in selected_electricity_rows:
+            if 0 <= row_num-1 < len(invoices):
+                selected_invoices.append(invoices[row_num-1])
+        
+        # Get water invoices by row numbers
+        for row_num in selected_water_rows:
+            if 0 <= row_num-1 < len(invoices):
+                selected_invoices.append(invoices[row_num-1])
+    
+    # Calculate totals
+    total_electricity = sum(float(inv['total'].replace('€', '').replace(',', '.')) for inv in selected_invoices if inv['service'].lower() == 'electricity' and inv['total'])
+    total_water = sum(float(inv['total'].replace('€', '').replace(',', '.')) for inv in selected_invoices if inv['service'].lower() == 'water' and inv['total'])
+    
+    print(f"🤖 [COHERE] Analysis complete: €{total_electricity:.2f} electricity, €{total_water:.2f} water")
+    print(f"🤖 [COHERE] Reasoning: {reasoning}")
+    
+    return {
+        'selected_invoices': selected_invoices,
+        'total_electricity': total_electricity,
+        'total_water': total_water,
+        'total_all': total_electricity + total_water,
+        'reasoning': reasoning
+    }
+
+# ---------- main invoice flow ----------
+async def process_property_invoices(property_name: str) -> dict:
+    """
+    Process invoices for a single property:
+    1. Search for property
+    2. Extract table data
+    3. Use LLM to select invoices
+    4. Download selected invoices
+    5. Calculate overuse
+    """
+    print(f"🏠 [PROPERTY] Processing invoices for: {property_name}")
+    
+    user_data = str(Path("./.chrome-profile").resolve())
+    Path(user_data).mkdir(exist_ok=True)
+    Path("_debug").mkdir(exist_ok=True)
+    Path("_debug/downloads").mkdir(parents=True, exist_ok=True)
+
+    async with async_playwright() as p:
+        print("🌐 [BROWSER] Launching browser...")
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=user_data,
+            headless=True,
+            slow_mo=0,
+            viewport={"width": 1366, "height": 900},
+            args=[
+                "--disable-gpu",
+                "--no-sandbox", 
+                "--disable-blink-features=AutomationControlled",
+                "--disable-web-security",
+                "--disable-features=VizDisplayCompositor",
+                "--disable-dev-shm-usage",
+                "--disable-extensions",
+                "--disable-plugins",
+                "--disable-images",
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            ],
+            accept_downloads=True,
+            ignore_https_errors=True,
+        )
+        context.set_default_timeout(120_000)
+        page = context.pages[0] if context.pages else await context.new_page()
+
+        try:
+            # 1) Login
+            await _ensure_logged_in(page)
+            
+            # 2) Navigate to Invoices
+            await _open_invoices_from_sidebar(page)
+            
+            # 3) Search for property
+            await _search_for_property(page, property_name)
+            
+            # 4) Extract table data
+            invoices = await _get_invoice_table_data(page)
+            
+            # 5) Use LLM to select invoices
+            analysis = analyze_invoices_with_cohere(invoices)
+            
+            # 6) Download selected invoices
+            downloaded_files = await _download_invoice_files(page, analysis['selected_invoices'], property_name)
+            
+            # 7) Calculate overuse (using existing logic)
+            from src.polaroo_process import ADDRESS_ROOM_MAPPING, ROOM_LIMITS, SPECIAL_LIMITS
+            
+            room_count = ADDRESS_ROOM_MAPPING.get(property_name, 1)
+            allowance = SPECIAL_LIMITS.get(property_name, ROOM_LIMITS.get(room_count, 50))
+            
+            total_cost = analysis['total_all']
+            overuse = max(0, total_cost - allowance)
+            
+            result = {
+                'property_name': property_name,
+                'room_count': room_count,
+                'allowance': allowance,
+                'total_electricity': analysis['total_electricity'],
+                'total_water': analysis['total_water'],
+                'total_cost': total_cost,
+                'overuse': overuse,
+                'selected_invoices': analysis['selected_invoices'],
+                'downloaded_files': downloaded_files,
+                'llm_reasoning': analysis.get('reasoning', 'No reasoning provided')
+            }
+            
+            print(f"✅ [PROPERTY] Completed processing for {property_name}: €{total_cost:.2f} total, €{overuse:.2f} overuse")
+            return result
+            
+        except Exception as e:
+            print(f"❌ [ERROR] Failed to process {property_name}: {e}")
+            raise
+        finally:
+            await context.close()
+
+async def process_first_10_properties() -> list[dict]:
+    """Process invoices for the first 10 properties in Book 1."""
+    from src.polaroo_process import USER_ADDRESSES
+    
+    first_10 = USER_ADDRESSES[:10]
+    results = []
+    
+    for property_name in first_10:
+        try:
+            result = await process_property_invoices(property_name)
+            results.append(result)
+        except Exception as e:
+            print(f"❌ [ERROR] Failed to process {property_name}: {e}")
+            results.append({
+                'property_name': property_name,
+                'error': str(e),
+                'total_cost': 0,
+                'overuse': 0
+            })
+    
+    return results
+
 # ---------- main flow ----------
 async def download_report_bytes() -> tuple[bytes, str]:
     """

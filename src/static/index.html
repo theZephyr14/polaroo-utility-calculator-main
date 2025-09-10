@@ -208,6 +208,10 @@
                         <button class="btn btn-success btn-calculate w-100 mt-3" onclick="calculateReport()">
                             <i class="fas fa-calculator me-2"></i>Calculate Monthly Report
                         </button>
+                        
+                        <button class="btn btn-primary w-100 mt-3" onclick="processInvoices()" style="background: linear-gradient(135deg, #0d6efd, #0056b3); border: none; padding: 1rem; font-weight: 600; border-radius: 50px;">
+                            <i class="fas fa-file-invoice me-2"></i>Process Invoices (First 10 Properties)
+                        </button>
                     </div>
                 </div>
                 
@@ -420,6 +424,87 @@
                 calculateBtn.disabled = false;
                 calculateBtn.innerHTML = '<i class="fas fa-calculator me-2"></i>Calculate Monthly Report';
             }
+        }
+        
+        async function processInvoices() {
+            const loadingElement = document.getElementById('loadingOverview');
+            const processBtn = document.querySelector('button[onclick="processInvoices()"]');
+            
+            // Show loading state
+            loadingElement.style.display = 'block';
+            processBtn.disabled = true;
+            processBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Processing Invoices...';
+            
+            try {
+                const response = await fetch('/api/process-first-10', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    currentData = result.data;
+                    updateInvoiceUI(result.data);
+                    showSuccessMessage(`Invoice processing completed! Processed ${result.data.successful_properties}/${result.data.total_properties} properties successfully.`);
+                } else {
+                    throw new Error(result.error || 'Invoice processing failed');
+                }
+                
+            } catch (error) {
+                console.error('Error processing invoices:', error);
+                showErrorMessage('Failed to process invoices: ' + error.message);
+            } finally {
+                // Hide loading state
+                loadingElement.style.display = 'none';
+                processBtn.disabled = false;
+                processBtn.innerHTML = '<i class="fas fa-file-invoice me-2"></i>Process Invoices (First 10 Properties)';
+            }
+        }
+        
+        function updateInvoiceUI(data) {
+            // Update summary cards with invoice data
+            const totalElec = data.properties.reduce((sum, prop) => sum + (prop.total_electricity || 0), 0);
+            const totalWater = data.properties.reduce((sum, prop) => sum + (prop.total_water || 0), 0);
+            const totalExtra = data.properties.reduce((sum, prop) => sum + (prop.overuse || 0), 0);
+            
+            document.getElementById('totalElecCost').textContent = `€${totalElec.toFixed(2)}`;
+            document.getElementById('totalWaterCost').textContent = `€${totalWater.toFixed(2)}`;
+            document.getElementById('totalExtra').textContent = `€${totalExtra.toFixed(2)}`;
+            document.getElementById('totalProperties').textContent = data.successful_properties;
+            
+            // Update properties table
+            const tbody = document.querySelector('#propertiesTable tbody');
+            tbody.innerHTML = '';
+            
+            data.properties.forEach(property => {
+                const row = document.createElement('tr');
+                if (property.overuse > 0) {
+                    row.classList.add('overage-row');
+                }
+                
+                row.innerHTML = `
+                    <td>${property.property_name}</td>
+                    <td>€${(property.total_electricity || 0).toFixed(2)}</td>
+                    <td>€${(property.total_water || 0).toFixed(2)}</td>
+                    <td>€${(property.overuse || 0).toFixed(2)}</td>
+                    <td>${property.room_count || 'N/A'} rooms</td>
+                    <td>€${(property.allowance || 0).toFixed(2)}</td>
+                    <td>
+                        ${property.llm_reasoning ? 
+                            `<span class="badge bg-info" title="${property.llm_reasoning}">LLM Analysis</span>` : 
+                            '<span class="badge bg-secondary">Standard</span>'
+                        }
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
         }
         
         function updateUI(data) {
