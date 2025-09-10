@@ -446,10 +446,16 @@ async def _download_invoice_files(page, selected_invoices: list[dict], property_
                 data = local_path.read_bytes()
                 # Create folder structure: invoices/{property_name}/filename
                 supabase_filename = f"invoices/{property_name}/{filename}"
-                key = _upload_to_supabase_bytes(supabase_filename, data)
-                downloaded_files.append(key)
+                try:
+                    key = _upload_to_supabase_bytes(supabase_filename, data)
+                    downloaded_files.append(key)
+                    print(f"✅ [UPLOAD] Successfully uploaded to Supabase: {key}")
+                except Exception as upload_error:
+                    print(f"❌ [UPLOAD] Failed to upload to Supabase: {upload_error}")
+                    # Still add to list for tracking, but mark as failed
+                    downloaded_files.append(f"FAILED: {supabase_filename}")
                 
-                print(f"✅ [DOWNLOAD] Downloaded and uploaded: {key}")
+                print(f"✅ [DOWNLOAD] Downloaded and processed: {filename}")
                 
                 # Close the Adobe Acrobat tab
                 await new_page.close()
@@ -460,13 +466,105 @@ async def _download_invoice_files(page, selected_invoices: list[dict], property_
     
     return downloaded_files
 
+# ---------- Month selection ----------
+def get_user_month_selection() -> tuple[str, str]:
+    """
+    Ask user to select 2 months for calculation.
+    Returns tuple of (start_month, end_month) in YYYY-MM format.
+    """
+    print("📅 [MONTH SELECTION] Please select 2 months for calculation:")
+    print("Available months (last 12 months):")
+    
+    from datetime import datetime, timedelta
+    current_date = datetime.now()
+    months = []
+    
+    for i in range(12):
+        month_date = current_date - timedelta(days=30*i)
+        month_str = month_date.strftime("%Y-%m")
+        month_display = month_date.strftime("%B %Y")
+        months.append((month_str, month_display))
+        print(f"{i+1}. {month_display} ({month_str})")
+    
+    while True:
+        try:
+            choice1 = int(input("Enter first month number (1-12): ")) - 1
+            if 0 <= choice1 < len(months):
+                start_month = months[choice1][0]
+                break
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Please enter a valid number.")
+    
+    while True:
+        try:
+            choice2 = int(input("Enter second month number (1-12): ")) - 1
+            if 0 <= choice2 < len(months):
+                end_month = months[choice2][0]
+                break
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Please enter a valid number.")
+    
+    print(f"✅ [MONTH SELECTION] Selected months: {months[choice1][1]} to {months[choice2][1]}")
+    return start_month, end_month
+
+def filter_invoices_by_date_range(invoices: list[dict], start_month: str, end_month: str) -> list[dict]:
+    """
+    Filter invoices to only include those within the specified date range.
+    Looks at both initial_date and final_date columns.
+    """
+    print(f"🔍 [FILTER] Filtering invoices for date range: {start_month} to {end_month}")
+    
+    filtered_invoices = []
+    for invoice in invoices:
+        initial_date = invoice.get('initial_date', '')
+        final_date = invoice.get('final_date', '')
+        
+        # Try to parse dates and check if they fall within range
+        try:
+            from datetime import datetime
+            
+            # Parse initial date
+            if initial_date:
+                initial_parsed = datetime.strptime(initial_date.split()[0], '%Y-%m-%d')
+                initial_month = initial_parsed.strftime('%Y-%m')
+            else:
+                initial_month = None
+            
+            # Parse final date
+            if final_date:
+                final_parsed = datetime.strptime(final_date.split()[0], '%Y-%m-%d')
+                final_month = final_parsed.strftime('%Y-%m')
+            else:
+                final_month = None
+            
+            # Check if either date falls within our range
+            if (initial_month and start_month <= initial_month <= end_month) or \
+               (final_month and start_month <= final_month <= end_month):
+                filtered_invoices.append(invoice)
+                print(f"✅ [FILTER] Included invoice: {invoice.get('service', 'Unknown')} - {initial_date} to {final_date}")
+            else:
+                print(f"❌ [FILTER] Excluded invoice: {invoice.get('service', 'Unknown')} - {initial_date} to {final_date}")
+                
+        except Exception as e:
+            print(f"⚠️ [FILTER] Error parsing dates for invoice: {e}")
+            # If we can't parse dates, include it to be safe
+            filtered_invoices.append(invoice)
+    
+    print(f"✅ [FILTER] Filtered to {len(filtered_invoices)} invoices from {len(invoices)} total")
+    return filtered_invoices
+
 # ---------- Cohere LLM integration ----------
-def analyze_invoices_with_cohere(invoices: list[dict]) -> dict:
+def analyze_invoices_with_cohere(invoices: list[dict], start_month: str, end_month: str) -> dict:
     """
     Use Cohere LLM to analyze invoices and select the right ones.
     Returns selected invoices and calculation data.
     """
     print("🤖 [COHERE] Analyzing invoices with LLM...")
+    print(f"🤖 [COHERE] Date range: {start_month} to {end_month}")
     
     try:
         import cohere
@@ -477,24 +575,27 @@ def analyze_invoices_with_cohere(invoices: list[dict]) -> dict:
         
         # Prepare invoice data for LLM analysis
         invoice_text = "Invoice Analysis Request:\n\n"
-        invoice_text += "I need to select the right invoices for utility bill calculation.\n"
-        invoice_text += "I need 2 electricity bills (monthly) and 1 water bill (every 2 months) from the last 3 months.\n\n"
-        invoice_text += "Available invoices:\n"
+        invoice_text += f"I need to select the right invoices for utility bill calculation for the period {start_month} to {end_month}.\n"
+        invoice_text += "I need 2 electricity bills (monthly) and 1 water bill (every 2 months) from this period.\n\n"
+        invoice_text += "Available invoices (filtered by date range):\n"
         
         for i, inv in enumerate(invoices):
             invoice_text += f"Row {i+1}:\n"
-            invoice_text += f"  Service: {inv['service']}\n"
-            invoice_text += f"  Issue Date: {inv['issue_date']}\n"
-            invoice_text += f"  Initial Date: {inv['initial_date']}\n"
-            invoice_text += f"  Final Date: {inv['final_date']}\n"
-            invoice_text += f"  Total: {inv['total']}\n"
-            invoice_text += f"  Provider: {inv['provider']}\n\n"
+            invoice_text += f"  Service: {inv.get('service', 'N/A')}\n"
+            invoice_text += f"  Issue Date: {inv.get('issue_date', 'N/A')}\n"
+            invoice_text += f"  Initial Date: {inv.get('initial_date', 'N/A')}\n"
+            invoice_text += f"  Final Date: {inv.get('final_date', 'N/A')}\n"
+            invoice_text += f"  Total: {inv.get('total', 'N/A')}\n"
+            invoice_text += f"  Provider: {inv.get('provider', 'N/A')}\n"
+            invoice_text += f"  Company: {inv.get('company', 'N/A')}\n\n"
         
         invoice_text += "\nPlease analyze these invoices and select:\n"
-        invoice_text += "1. The 2 most recent electricity bills (monthly billing)\n"
-        invoice_text += "2. The 1 most recent water bill (2-month billing period)\n"
-        invoice_text += "3. Calculate the total cost for each service type\n"
-        invoice_text += "4. Return the row numbers of selected invoices\n\n"
+        invoice_text += "1. The 2 most recent electricity bills (monthly billing) from the specified period\n"
+        invoice_text += "2. The 1 most recent water bill (2-month billing period) from the specified period\n"
+        invoice_text += "3. Make sure to look at Initial Date and Final Date columns to confirm the billing period\n"
+        invoice_text += "4. Verify the Service column shows 'electricity' or 'water'\n"
+        invoice_text += "5. Extract the Total amount for calculations\n"
+        invoice_text += "6. Return the row numbers of selected invoices\n\n"
         invoice_text += "Format your response as JSON with this structure:\n"
         invoice_text += '{"selected_electricity_rows": [row_numbers], "selected_water_rows": [row_numbers], "reasoning": "explanation"}'
         
@@ -502,7 +603,7 @@ def analyze_invoices_with_cohere(invoices: list[dict]) -> dict:
         response = co.generate(
             model='command',
             prompt=invoice_text,
-            max_tokens=500,
+            max_tokens=800,
             temperature=0.1
         )
         
@@ -540,12 +641,12 @@ def analyze_invoices_with_cohere(invoices: list[dict]) -> dict:
         print("🔄 [COHERE] Using fallback logic...")
         
         # Filter invoices by service type
-        electricity_invoices = [inv for inv in invoices if inv['service'].lower() == 'electricity']
-        water_invoices = [inv for inv in invoices if inv['service'].lower() == 'water']
+        electricity_invoices = [inv for inv in invoices if inv.get('service', '').lower() in ['electricity', 'electric']]
+        water_invoices = [inv for inv in invoices if inv.get('service', '').lower() in ['water', 'agua']]
         
-        # Sort by issue date (most recent first)
-        electricity_invoices.sort(key=lambda x: x['issue_date'], reverse=True)
-        water_invoices.sort(key=lambda x: x['issue_date'], reverse=True)
+        # Sort by final date (most recent first)
+        electricity_invoices.sort(key=lambda x: x.get('final_date', ''), reverse=True)
+        water_invoices.sort(key=lambda x: x.get('final_date', ''), reverse=True)
         
         # Select 2 most recent electricity and 1 most recent water
         selected_electricity = electricity_invoices[:2]
@@ -568,9 +669,29 @@ def analyze_invoices_with_cohere(invoices: list[dict]) -> dict:
             if 0 <= row_num-1 < len(invoices):
                 selected_invoices.append(invoices[row_num-1])
     
-    # Calculate totals
-    total_electricity = sum(float(inv['total'].replace('€', '').replace(',', '.')) for inv in selected_invoices if inv['service'].lower() == 'electricity' and inv['total'])
-    total_water = sum(float(inv['total'].replace('€', '').replace(',', '.')) for inv in selected_invoices if inv['service'].lower() == 'water' and inv['total'])
+    # Calculate totals with better error handling
+    total_electricity = 0.0
+    total_water = 0.0
+    
+    for inv in selected_invoices:
+        try:
+            total_str = inv.get('total', '0')
+            if total_str and total_str != 'N/A':
+                # Clean the total string
+                total_clean = total_str.replace('€', '').replace(',', '.').replace(' ', '').strip()
+                if total_clean:
+                    total_value = float(total_clean)
+                    
+                    service = inv.get('service', '').lower()
+                    if service in ['electricity', 'electric']:
+                        total_electricity += total_value
+                    elif service in ['water', 'agua']:
+                        total_water += total_value
+                    
+                    print(f"💰 [CALC] {service}: {total_str} -> {total_value}")
+        except (ValueError, TypeError) as e:
+            print(f"⚠️ [CALC] Error parsing total '{inv.get('total', '')}': {e}")
+            continue
     
     print(f"🤖 [COHERE] Analysis complete: €{total_electricity:.2f} electricity, €{total_water:.2f} water")
     print(f"🤖 [COHERE] Reasoning: {reasoning}")
@@ -584,16 +705,18 @@ def analyze_invoices_with_cohere(invoices: list[dict]) -> dict:
     }
 
 # ---------- main invoice flow ----------
-async def process_property_invoices(property_name: str) -> dict:
+async def process_property_invoices(property_name: str, start_month: str, end_month: str) -> dict:
     """
     Process invoices for a single property:
     1. Search for property
     2. Extract table data
-    3. Use LLM to select invoices
-    4. Download selected invoices
-    5. Calculate overuse
+    3. Filter by date range
+    4. Use LLM to select invoices
+    5. Download selected invoices
+    6. Calculate overuse
     """
     print(f"🏠 [PROPERTY] Processing invoices for: {property_name}")
+    print(f"📅 [PROPERTY] Date range: {start_month} to {end_month}")
     
     user_data = str(Path("./.chrome-profile").resolve())
     Path(user_data).mkdir(exist_ok=True)
@@ -638,13 +761,16 @@ async def process_property_invoices(property_name: str) -> dict:
             # 4) Extract table data
             invoices = await _get_invoice_table_data(page)
             
-            # 5) Use LLM to select invoices
-            analysis = analyze_invoices_with_cohere(invoices)
+            # 5) Filter by date range
+            filtered_invoices = filter_invoices_by_date_range(invoices, start_month, end_month)
             
-            # 6) Download selected invoices
+            # 6) Use LLM to select invoices
+            analysis = analyze_invoices_with_cohere(filtered_invoices, start_month, end_month)
+            
+            # 7) Download selected invoices
             downloaded_files = await _download_invoice_files(page, analysis['selected_invoices'], property_name)
             
-            # 7) Calculate overuse (using existing logic)
+            # 8) Calculate overuse (using existing logic)
             from src.polaroo_process import ADDRESS_ROOM_MAPPING, ROOM_LIMITS, SPECIAL_LIMITS
             
             room_count = ADDRESS_ROOM_MAPPING.get(property_name, 1)
@@ -658,6 +784,7 @@ async def process_property_invoices(property_name: str) -> dict:
             
             result = {
                 'property_name': property_name,
+                'date_range': f"{start_month} to {end_month}",
                 'room_count': room_count,
                 'allowance': allowance,
                 'total_electricity': analysis['total_electricity'],
@@ -682,17 +809,21 @@ async def process_first_10_properties() -> list[dict]:
     """Process invoices for the first 10 properties in Book 1."""
     from src.polaroo_process import USER_ADDRESSES
     
+    # Get month selection from user
+    start_month, end_month = get_user_month_selection()
+    
     first_10 = USER_ADDRESSES[:10]
     results = []
     
     for property_name in first_10:
         try:
-            result = await process_property_invoices(property_name)
+            result = await process_property_invoices(property_name, start_month, end_month)
             results.append(result)
         except Exception as e:
             print(f"❌ [ERROR] Failed to process {property_name}: {e}")
             results.append({
                 'property_name': property_name,
+                'date_range': f"{start_month} to {end_month}",
                 'error': str(e),
                 'total_cost': 0,
                 'overuse': 0
