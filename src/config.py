@@ -1,6 +1,16 @@
 import os
 from dotenv import load_dotenv
-load_dotenv()
+
+# Load environment variables with fallbacks
+try:
+    load_dotenv('.env2')
+except:
+    # Set environment variables directly if .env2 fails
+    os.environ.setdefault('STORAGE_BUCKET', 'polaroo_pdfs')
+    os.environ.setdefault('SUPABASE_URL', 'https://dfryezdsbwwfwkdfzhao.supabase.co')
+    os.environ.setdefault('SUPABASE_SERVICE_KEY', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmcnllemRzYnd3ZndrZGZ6aGFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYyMDEwNzEsImV4cCI6MjA3MTc3NzA3MX0.ZngI03QHOMQ0TFm49hCmbxDunA2vaQfaEzW44EVGKVk')
+    os.environ.setdefault('POLAROO_EMAIL', 'francisco@node-living.com')
+    os.environ.setdefault('POLAROO_PASSWORD', 'Aribau126!')
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")

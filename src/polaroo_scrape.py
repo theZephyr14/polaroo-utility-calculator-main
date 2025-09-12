@@ -38,9 +38,8 @@ def _upload_to_supabase_bytes(filename: str, data: bytes) -> str:
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not STORAGE_BUCKET:
         raise RuntimeError("Supabase env config missing: SUPABASE_URL / SUPABASE_SERVICE_KEY / STORAGE_BUCKET")
 
-    # namespacing by month keeps things tidy
-    month_slug = datetime.now(timezone.utc).strftime("%Y-%m")
-    object_key = f"polaroo/raw/{month_slug}/{filename}"
+    # Upload to raw folder with flat name subfolder
+    object_key = f"raw/{filename}"
 
     url = f"{SUPABASE_URL.rstrip('/')}/storage/v1/object/{quote(STORAGE_BUCKET)}/{quote(object_key)}"
     headers = {
@@ -112,8 +111,20 @@ async def _ensure_logged_in(page) -> None:
     else:
         print("✅ [LOGIN] Already logged in, redirected to dashboard")
 
-    await _wait_for_dashboard(page)
-    print("⏳ [WAIT] post-login dashboard settle … 10000ms")
+    # Wait 5 seconds after login, then navigate to accounting dashboard
+    print("⏳ [WAIT] Waiting 5 seconds after login...")
+    await page.wait_for_timeout(5_000)
+    
+    # Navigate directly to accounting dashboard
+    accounting_url = "https://app.polaroo.com/dashboard/accounting"
+    print(f"🌐 [NAVIGATE] Going to accounting dashboard: {accounting_url}")
+    await page.goto(accounting_url)
+    await page.wait_for_load_state("domcontentloaded")
+    await page.wait_for_load_state("networkidle")
+    print("✅ [NAVIGATE] Successfully reached accounting dashboard")
+    
+    # Wait 10 seconds after reaching accounting dashboard
+    print("⏳ [WAIT] Waiting 10 seconds after reaching accounting dashboard...")
     await page.wait_for_timeout(10_000)
 
 async def _open_report_from_sidebar(page) -> None:
@@ -326,7 +337,10 @@ async def _search_for_property(page, property_name: str) -> None:
     await search_input.click()
     await search_input.fill("")  # Clear existing text
     await search_input.fill(property_name)
-    await page.wait_for_timeout(1000)  # Wait for search to process
+    
+    # Wait exactly 5 seconds after searching as requested
+    print("⏳ [SEARCH] Waiting 5 seconds for search results to load...")
+    await page.wait_for_timeout(5000)
     print(f"✅ [SEARCH] Successfully searched for: {property_name}")
 
 async def _get_invoice_table_data(page) -> list[dict]:
@@ -386,79 +400,109 @@ async def _download_invoice_files(page, selected_invoices: list[dict], property_
             if invoice['download_button']:
                 print(f"📥 [DOWNLOAD] Downloading invoice {i+1}: {invoice['invoice_reference']}")
                 
-                # Listen for new page (Adobe Acrobat tab)
-                new_page_promise = context.wait_for_event("page")
-                
-                # Click the download button
-                await invoice['download_button'].click()
-                
-                # Wait for new page to open
-                new_page = await new_page_promise
-                await new_page.wait_for_load_state("domcontentloaded")
-                
-                print(f"📄 [DOWNLOAD] New tab opened: {new_page.url}")
-                
-                # Wait for Adobe Acrobat to load
-                await new_page.wait_for_timeout(3000)
-                
-                # Look for download button in Adobe Acrobat viewer
-                download_selectors = [
-                    'button[title*="Download"]',
-                    'button[aria-label*="Download"]',
-                    'button:has-text("Download")',
-                    'a[title*="Download"]',
-                    'a[aria-label*="Download"]',
-                    'a:has-text("Download")',
-                    '[data-testid*="download"]',
-                    '.download-button',
-                    'button[class*="download"]'
-                ]
-                
-                download_button = None
-                for selector in download_selectors:
-                    try:
-                        download_button = new_page.locator(selector).first
-                        if await download_button.count() > 0 and await download_button.is_visible():
-                            print(f"✅ [DOWNLOAD] Found download button with selector: {selector}")
+                # Correct approach: wait for new tab, switch to it, click download
+                try:
+                    # Get initial page count
+                    initial_pages = len(context.pages)
+                    print(f"📊 [PAGES] Initial page count: {initial_pages}")
+                    
+                    # Click the download button (this opens PDF in new tab)
+                    await invoice['download_button'].click()
+                    print("🖱️ [DOWNLOAD] Clicked download button, waiting for PDF tab...")
+                    
+                    # Wait for new page to appear (check every 500ms for 10 seconds)
+                    new_page = None
+                    for attempt in range(20):  # 20 attempts * 500ms = 10 seconds
+                        await page.wait_for_timeout(500)
+                        current_pages = len(context.pages)
+                        print(f"📊 [PAGES] Attempt {attempt + 1}: {current_pages} pages")
+                        
+                        if current_pages > initial_pages:
+                            new_page = context.pages[-1]  # Get the newest page
+                            print(f"✅ [NEW PAGE] New tab detected: {new_page.url}")
                             break
-                    except:
+                    
+                    if not new_page:
+                        print("❌ [ERROR] No new tab opened within 10 seconds")
+                        continue
+                    
+                    # Wait for the new page to load
+                    await new_page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    
+                    print(f"📄 [DOWNLOAD] PDF tab opened: {new_page.url}")
+                    
+                    # Wait for PDF to load (10 seconds)
+                    print("⏳ [PDF] Waiting for PDF to load...")
+                    await new_page.wait_for_timeout(10000)
+                    
+                    # Direct PDF download from URL (much more reliable)
+                    print(f"📄 [PDF] PDF URL: {new_page.url}")
+                    
+                    try:
+                        # Get PDF content directly from URL
+                        response = await new_page.goto(new_page.url)
+                        pdf_content = await response.body()
+                        print(f"✅ [PDF] Downloaded PDF content: {len(pdf_content)} bytes")
+                        
+                        # Generate filename
+                        suggested = f"invoice_{property_name}_{i+1}.pdf"
+                        stem = Path(suggested).stem or f"invoice_{property_name}_{i+1}"
+                        ext = Path(suggested).suffix or ".pdf"
+                        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                        filename = f"{stem}_{ts}{ext}"
+                        
+                        # Save locally first
+                        local_path = Path("_debug/downloads") / filename
+                        with open(local_path, 'wb') as f:
+                            f.write(pdf_content)
+                        size = local_path.stat().st_size if local_path.exists() else 0
+                        print(f"💾 [DOWNLOAD] Saved locally: {local_path} ({size} bytes)")
+                        
+                        # Upload to Supabase
+                        try:
+                            # Clean filename for S3 compatibility and include flat name
+                            clean_property_name = property_name.replace("º", "o").replace(" ", "_").replace("/", "_")
+                            supabase_filename = f"{clean_property_name}/{filename}"
+                            print(f"☁️ [UPLOAD] Uploading to Supabase: {supabase_filename}")
+                            
+                            # Upload to Supabase Storage
+                            key = _upload_to_supabase_bytes(supabase_filename, pdf_content)
+                            downloaded_files.append(key)
+                            print(f"✅ [UPLOAD] Successfully uploaded to Supabase: {key}")
+                            
+                        except Exception as upload_error:
+                            print(f"❌ [UPLOAD] Failed to upload to Supabase: {upload_error}")
+                            downloaded_files.append(f"FAILED: {supabase_filename}")
+                        
+                        print(f"✅ [DOWNLOAD] Successfully processed invoice {i+1}")
+                        
+                    except Exception as pdf_error:
+                        print(f"❌ [PDF] Failed to download PDF directly: {pdf_error}")
+                        await new_page.screenshot(path=f"_debug/pdf_download_error_{i+1}.png")
+                        print(f"📸 [DEBUG] PDF download error screenshot saved to _debug/pdf_download_error_{i+1}.png")
+                        await new_page.close()
                         continue
                 
-                if not download_button or await download_button.count() == 0:
-                    print(f"⚠️ [DOWNLOAD] No download button found in Adobe Acrobat viewer")
-                    await new_page.close()
+                    
+                    # Close the PDF tab and return to main tab
+                    try:
+                        await new_page.close()
+                        print("🔄 [TAB] Closed PDF tab, returning to main tab")
+                        await page.bring_to_front()
+                        await page.wait_for_timeout(1000)
+                    except Exception as close_error:
+                        print(f"⚠️ [TAB] Error closing PDF tab: {close_error}")
+                        # Continue anyway
+                    
+                except Exception as download_error:
+                    print(f"❌ [DOWNLOAD] Download failed for invoice {i+1}: {download_error}")
+                    # Take screenshot for debugging
+                    try:
+                        await page.screenshot(path=f"_debug/download_error_{i+1}.png")
+                        print(f"📸 [DEBUG] Download error screenshot saved to _debug/download_error_{i+1}.png")
+                    except:
+                        print("📸 [DEBUG] Could not take screenshot (page closed)")
                     continue
-                
-                # Generate filename
-                ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                filename = f"{property_name}_{invoice['service']}_{invoice['invoice_reference']}_{ts}.pdf"
-                
-                # Click download button and wait for download
-                async with new_page.expect_download() as dl_info:
-                    await download_button.click()
-                dl = await dl_info.value
-                
-                # Save locally
-                local_path = Path("_debug/downloads") / filename
-                await dl.save_as(str(local_path))
-                
-                # Upload to Supabase with proper folder structure
-                data = local_path.read_bytes()
-                # Create folder structure: invoices/{property_name}/filename
-                supabase_filename = f"invoices/{property_name}/{filename}"
-                try:
-                    key = _upload_to_supabase_bytes(supabase_filename, data)
-                    downloaded_files.append(key)
-                    print(f"✅ [UPLOAD] Successfully uploaded to Supabase: {key}")
-                except Exception as upload_error:
-                    print(f"❌ [UPLOAD] Failed to upload to Supabase: {upload_error}")
-                    # Still add to list for tracking, but mark as failed
-                    downloaded_files.append(f"FAILED: {supabase_filename}")
-                
-                print(f"✅ [DOWNLOAD] Downloaded and processed: {filename}")
-                
-                # Close the Adobe Acrobat tab
-                await new_page.close()
                 
         except Exception as e:
             print(f"❌ [DOWNLOAD] Error downloading invoice {i+1}: {e}")
@@ -509,6 +553,24 @@ def get_user_month_selection() -> tuple[str, str]:
             print("Please enter a valid number.")
     
     print(f"✅ [MONTH SELECTION] Selected months: {months[choice1][1]} to {months[choice2][1]}")
+    return start_month, end_month
+
+def get_user_month_selection_auto() -> tuple[str, str]:
+    """
+    Auto-select the last 2 months for testing purposes.
+    Returns tuple of (start_month, end_month) in YYYY-MM format.
+    """
+    from datetime import datetime, timedelta
+    current_date = datetime.now()
+    
+    # Get last 2 months
+    last_month = current_date - timedelta(days=30)
+    two_months_ago = current_date - timedelta(days=60)
+    
+    start_month = two_months_ago.strftime("%Y-%m")
+    end_month = last_month.strftime("%Y-%m")
+    
+    print(f"📅 [AUTO SELECTION] Using last 2 months: {start_month} to {end_month}")
     return start_month, end_month
 
 def filter_invoices_by_date_range(invoices: list[dict], start_month: str, end_month: str) -> list[dict]:
@@ -576,8 +638,9 @@ def analyze_invoices_with_cohere(invoices: list[dict], start_month: str, end_mon
         # Prepare invoice data for LLM analysis
         invoice_text = "Invoice Analysis Request:\n\n"
         invoice_text += f"I need to select the right invoices for utility bill calculation for the period {start_month} to {end_month}.\n"
+        invoice_text += f"IMPORTANT: The period is {start_month} to {end_month} (e.g., 2025-05 to 2025-06 means May 2025 to June 2025).\n"
         invoice_text += "I need 2 electricity bills (monthly) and 1 water bill (every 2 months) from this period.\n\n"
-        invoice_text += "Available invoices (filtered by date range):\n"
+        invoice_text += f"Available invoices (filtered by date range) - Total: {len(invoices)}:\n"
         
         for i, inv in enumerate(invoices):
             invoice_text += f"Row {i+1}:\n"
@@ -589,15 +652,29 @@ def analyze_invoices_with_cohere(invoices: list[dict], start_month: str, end_mon
             invoice_text += f"  Provider: {inv.get('provider', 'N/A')}\n"
             invoice_text += f"  Company: {inv.get('company', 'N/A')}\n\n"
         
-        invoice_text += "\nPlease analyze these invoices and select:\n"
-        invoice_text += "1. The 2 most recent electricity bills (monthly billing) from the specified period\n"
-        invoice_text += "2. The 1 most recent water bill (2-month billing period) from the specified period\n"
-        invoice_text += "3. Make sure to look at Initial Date and Final Date columns to confirm the billing period\n"
-        invoice_text += "4. Verify the Service column shows 'electricity' or 'water'\n"
-        invoice_text += "5. Extract the Total amount for calculations\n"
-        invoice_text += "6. Return the row numbers of selected invoices\n\n"
-        invoice_text += "Format your response as JSON with this structure:\n"
-        invoice_text += '{"selected_electricity_rows": [row_numbers], "selected_water_rows": [row_numbers], "reasoning": "explanation"}'
+        invoice_text += f"\nOPERATIONAL LOGIC (for start of month calculations):\n"
+        invoice_text += f"\nWATER: Find 1 bill that covers BOTH months of the period\n"
+        invoice_text += f"- If calculating for {start_month} to {end_month} period\n"
+        invoice_text += f"- Look for water bill that covers {start_month} AND {end_month} (any date range that includes both months)\n"
+        invoice_text += f"\nELECTRICITY: Find 2 separate bills\n"
+        invoice_text += f"- 1 bill that covers the first month of the period ({start_month})\n"
+        invoice_text += f"- 1 bill that covers the second month of the period ({end_month})\n"
+        invoice_text += f"- Each bill can have any date range as long as it covers its respective month\n"
+        invoice_text += f"\nFLEXIBLE DATE MATCHING EXAMPLES:\n"
+        invoice_text += f"- Water bill 15/06-15/08 covers July-August ✓\n"
+        invoice_text += f"- Water bill 01/07-31/08 covers July-August ✓\n"
+        invoice_text += f"- Water bill 20/07-20/09 covers July-August ✓\n"
+        invoice_text += f"- Electricity 15/07-14/08 covers July ✓\n"
+        invoice_text += f"- Electricity 01/08-31/08 covers August ✓\n"
+        invoice_text += f"- Electricity 20/08-19/09 covers August ✓\n"
+        invoice_text += f"\nThe goal is to find bills that actually cover the months you're calculating for, regardless of the specific dates.\n"
+        invoice_text += f"\nIMPORTANT RULES:\n"
+        invoice_text += f"- Only select bills that cover the months you're calculating for\n"
+        invoice_text += f"- Do NOT substitute with older bills if the required bills are not available\n"
+        invoice_text += f"- If bills are missing for the period, return empty arrays and explain what's missing\n"
+        invoice_text += f"- Return the row numbers of selected invoices\n\n"
+        invoice_text += f"Format your response as JSON with this structure:\n"
+        invoice_text += f'{{"selected_electricity_rows": [row_numbers], "selected_water_rows": [row_numbers], "reasoning": "explanation", "missing_bills": "what is missing"}}'
         
         # Call Cohere API
         response = co.generate(
@@ -614,21 +691,42 @@ def analyze_invoices_with_cohere(invoices: list[dict], start_month: str, end_mon
         # Try to parse JSON response
         import json
         try:
-            analysis = json.loads(llm_response)
+            # Extract JSON from response (handle cases where LLM adds extra text)
+            json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                # Clean control characters that break JSON parsing
+                json_str = json_str.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                # Remove multiple spaces
+                json_str = re.sub(r'\s+', ' ', json_str)
+                analysis = json.loads(json_str)
+            else:
+                # Try parsing the whole response
+                llm_response_clean = llm_response.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                llm_response_clean = re.sub(r'\s+', ' ', llm_response_clean)
+                analysis = json.loads(llm_response_clean)
+            
             selected_electricity_rows = analysis.get('selected_electricity_rows', [])
             selected_water_rows = analysis.get('selected_water_rows', [])
             reasoning = analysis.get('reasoning', 'No reasoning provided')
+            missing_bills = analysis.get('missing_bills', 'None')
             
+            print(f"✅ [COHERE] Parsed: {len(selected_electricity_rows)} electricity, {len(selected_water_rows)} water bills")
             print(f"🤖 [COHERE] Selected electricity rows: {selected_electricity_rows}")
             print(f"🤖 [COHERE] Selected water rows: {selected_water_rows}")
             print(f"🤖 [COHERE] Reasoning: {reasoning}")
+            if missing_bills and missing_bills != 'None':
+                print(f"⚠️ [COHERE] Missing: {missing_bills}")
             
-        except json.JSONDecodeError:
-            print("⚠️ [COHERE] Failed to parse JSON response, using fallback logic")
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"⚠️ [COHERE] Failed to parse JSON response: {e}")
+            print(f"🔍 [COHERE] Raw response: {llm_response[:200]}...")
+            print("🔄 [COHERE] Using fallback logic...")
             # Fallback to basic logic
             selected_electricity_rows = []
             selected_water_rows = []
-            reasoning = "JSON parsing failed, using fallback logic"
+            reasoning = f"JSON parsing failed: {e}"
+            missing_bills = "Could not parse LLM response"
     
     except Exception as e:
         print(f"⚠️ [COHERE] Error with Cohere API: {e}, using fallback logic")
@@ -640,20 +738,69 @@ def analyze_invoices_with_cohere(invoices: list[dict], start_month: str, end_mon
     if not selected_electricity_rows and not selected_water_rows:
         print("🔄 [COHERE] Using fallback logic...")
         
-        # Filter invoices by service type
-        electricity_invoices = [inv for inv in invoices if inv.get('service', '').lower() in ['electricity', 'electric']]
-        water_invoices = [inv for inv in invoices if inv.get('service', '').lower() in ['water', 'agua']]
+        # Filter invoices by service type and date range
+        from datetime import datetime
+        
+        # Parse the date range
+        start_year, start_month_num = map(int, start_month.split('-'))
+        end_year, end_month_num = map(int, end_month.split('-'))
+        
+        def is_in_date_range(invoice):
+            try:
+                # Try to parse initial_date or final_date
+                date_str = invoice.get('initial_date', '') or invoice.get('final_date', '')
+                if not date_str:
+                    return False
+                
+                # Parse date (assuming DD/MM/YYYY format)
+                if '/' in date_str:
+                    day, month, year = map(int, date_str.split('/'))
+                    invoice_date = datetime(year, month, 1)
+                    
+                    # Check if invoice date falls within the range
+                    start_date = datetime(start_year, start_month_num, 1)
+                    end_date = datetime(end_year, end_month_num, 1)
+                    
+                    return start_date <= invoice_date <= end_date
+                return False
+            except:
+                return False
+        
+        # Filter by service type AND date range
+        electricity_invoices = [inv for inv in invoices 
+                              if inv.get('service', '').lower() in ['electricity', 'electric'] 
+                              and is_in_date_range(inv)]
+        water_invoices = [inv for inv in invoices 
+                         if inv.get('service', '').lower() in ['water', 'agua'] 
+                         and is_in_date_range(inv)]
         
         # Sort by final date (most recent first)
         electricity_invoices.sort(key=lambda x: x.get('final_date', ''), reverse=True)
         water_invoices.sort(key=lambda x: x.get('final_date', ''), reverse=True)
         
-        # Select 2 most recent electricity and 1 most recent water
+        # Select invoices and inform user about availability
         selected_electricity = electricity_invoices[:2]
         selected_water = water_invoices[:1]
         
+        # Inform user about missing bills - be strict about not substituting
+        missing_bills = []
+        if not electricity_invoices:
+            missing_bills.append("No electricity bills found in the specified period")
+        elif len(electricity_invoices) < 2:
+            missing_bills.append(f"Only {len(electricity_invoices)} electricity bill(s) found (expected 2)")
+        
+        if not water_invoices:
+            missing_bills.append("No water bills found in the specified period")
+        
+        if missing_bills:
+            print("⚠️ [WARNING] Missing bills:")
+            for missing in missing_bills:
+                print(f"  - {missing}")
+            print("❌ [ERROR] Cannot proceed with calculation - required bills are missing!")
+            print("ℹ️ [INFO] Please check if the correct months were selected or if bills are available")
+        
         selected_invoices = selected_electricity + selected_water
-        reasoning = "Fallback logic: selected most recent invoices by service type"
+        reasoning = f"Strict fallback: found {len(selected_electricity)} electricity and {len(selected_water)} water bills in date range. Missing: {', '.join(missing_bills) if missing_bills else 'None'}"
     
     else:
         # Use LLM selections
@@ -682,13 +829,19 @@ def analyze_invoices_with_cohere(invoices: list[dict], start_month: str, end_mon
                 if total_clean:
                     total_value = float(total_clean)
                     
-                    service = inv.get('service', '').lower()
+                    service = inv.get('service', '').strip().lower()
+                    print(f"🔍 [DEBUG] Service field: '{inv.get('service', '')}' -> cleaned: '{service}'")
+                    
                     if service in ['electricity', 'electric']:
                         total_electricity += total_value
+                        print(f"💰 [CALC] {service}: {total_str} -> {total_value}")
                     elif service in ['water', 'agua']:
                         total_water += total_value
-                    
-                    print(f"💰 [CALC] {service}: {total_str} -> {total_value}")
+                        print(f"💰 [CALC] {service}: {total_str} -> {total_value}")
+                    elif service in ['gas', 'gas natural']:
+                        print(f"💰 [CALC] {service}: {total_str} -> {total_value} (EXCLUDED from calculation)")
+                    else:
+                        print(f"💰 [CALC] {service}: {total_str} -> {total_value} (UNKNOWN service - excluded)")
         except (ValueError, TypeError) as e:
             print(f"⚠️ [CALC] Error parsing total '{inv.get('total', '')}': {e}")
             continue
@@ -752,8 +905,8 @@ async def process_property_invoices(property_name: str, start_month: str, end_mo
             # 1) Login
             await _ensure_logged_in(page)
             
-            # 2) Navigate to Invoices
-            await _open_invoices_from_sidebar(page)
+            # 2) We're already on the accounting dashboard - ready to search for invoices
+            print("✅ [ACCOUNTING] Ready to search for invoices on accounting dashboard")
             
             # 3) Search for property
             await _search_for_property(page, property_name)
@@ -761,11 +914,27 @@ async def process_property_invoices(property_name: str, start_month: str, end_mo
             # 4) Extract table data
             invoices = await _get_invoice_table_data(page)
             
-            # 5) Filter by date range
-            filtered_invoices = filter_invoices_by_date_range(invoices, start_month, end_month)
+            if not invoices:
+                print("❌ [ERROR] No invoice data found")
+                return {
+                    'property_name': property_name,
+                    'date_range': f"{start_month} to {end_month}",
+                    'room_count': 0,
+                    'allowance': 0.0,
+                    'total_electricity': 0.0,
+                    'total_water': 0.0,
+                    'total_cost': 0.0,
+                    'overuse': 0.0,
+                    'selected_invoices': [],
+                    'downloaded_files': [],
+                    'llm_reasoning': "No invoice data found"
+                }
             
-            # 6) Use LLM to select invoices
-            analysis = analyze_invoices_with_cohere(filtered_invoices, start_month, end_month)
+            print(f"📊 [INVOICES] Found {len(invoices)} total invoices")
+            
+            # 5) Use LLM to analyze ALL invoices and select the right ones
+            print("🤖 [LLM] Analyzing all invoices with Cohere...")
+            analysis = analyze_invoices_with_cohere(invoices, start_month, end_month)
             
             # 7) Download selected invoices
             downloaded_files = await _download_invoice_files(page, analysis['selected_invoices'], property_name)
@@ -811,6 +980,32 @@ async def process_first_10_properties() -> list[dict]:
     
     # Get month selection from user
     start_month, end_month = get_user_month_selection()
+    
+    first_10 = USER_ADDRESSES[:10]
+    results = []
+    
+    for property_name in first_10:
+        try:
+            result = await process_property_invoices(property_name, start_month, end_month)
+            results.append(result)
+        except Exception as e:
+            print(f"❌ [ERROR] Failed to process {property_name}: {e}")
+            results.append({
+                'property_name': property_name,
+                'date_range': f"{start_month} to {end_month}",
+                'error': str(e),
+                'total_cost': 0,
+                'overuse': 0
+            })
+    
+    return results
+
+async def process_first_10_properties_auto() -> list[dict]:
+    """Process invoices for the first 10 properties in Book 1 with auto month selection."""
+    from src.polaroo_process import USER_ADDRESSES
+    
+    # Auto-select last 2 months
+    start_month, end_month = get_user_month_selection_auto()
     
     first_10 = USER_ADDRESSES[:10]
     results = []
