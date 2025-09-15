@@ -546,73 +546,143 @@ async def get_system_settings():
 @app.post("/api/calculate", response_model=CalculationResponse)
 async def calculate_monthly_report_legacy(request: CalculationRequest):
     """
-    Legacy endpoint for monthly calculation.
+    Calculate monthly report with proper month-by-month overuse calculation.
     
-    This endpoint maintains backward compatibility while using the new Supabase system.
+    This endpoint processes each month separately and calculates overuse correctly.
     """
     try:
-        print("🚀 [API] Legacy monthly calculation request...")
+        print("🚀 [API] Starting month-by-month calculation...")
+        print(f"📅 [API] Date range: {request.start_date} to {request.end_date}")
+        
+        # Parse dates
+        from datetime import datetime
+        start_date = datetime.strptime(request.start_date, "%Y-%m-%d")
+        end_date = datetime.strptime(request.end_date, "%Y-%m-%d")
         
         # Get all properties
         manager = get_supabase_manager()
         properties = manager.get_all_properties()
         
-        # Process first 10 properties as a sample
-        property_names = [prop.name for prop in properties[:10]]
+        # Generate list of months to process
+        months_to_process = []
+        current_date = start_date.replace(day=1)  # Start of month
         
-        result = await process_multiple_properties(
-            property_names=property_names,
-            start_date=request.start_date,
-            end_date=request.end_date
-        )
+        while current_date <= end_date:
+            months_to_process.append(current_date.strftime("%Y-%m"))
+            # Move to next month
+            if current_date.month == 12:
+                current_date = current_date.replace(year=current_date.year + 1, month=1)
+            else:
+                current_date = current_date.replace(month=current_date.month + 1)
         
-        if "error" in result:
-            return CalculationResponse(
-                success=False,
-                message="Legacy calculation failed",
-                error=result["error"]
+        print(f"📊 [API] Processing {len(months_to_process)} months: {months_to_process}")
+        
+        # Process each month separately
+        monthly_results = {}
+        for month in months_to_process:
+            print(f"📅 [API] Processing month: {month}")
+            
+            # Get month start and end dates
+            month_start = f"{month}-01"
+            month_end = f"{month}-31"
+            
+            # Process properties for this month
+            result = await process_multiple_properties(
+                property_names=[prop.name for prop in properties],
+                start_date=month_start,
+                end_date=month_end
             )
+            
+            if "error" not in result:
+                monthly_results[month] = result
+            else:
+                print(f"❌ [API] Error processing month {month}: {result['error']}")
         
-        # Convert to legacy format
-        legacy_data = {
-            "properties": [
-                {
-                    "name": prop["property_name"],
+        # Combine results month by month
+        combined_properties = {}
+        
+        for month, result in monthly_results.items():
+            for prop in result.get("properties", []):
+                if "error" in prop:
+                    continue
+                    
+                prop_name = prop["property_name"]
+                
+                if prop_name not in combined_properties:
+                    # Initialize property data
+                    combined_properties[prop_name] = {
+                        "name": prop_name,
+                        "elec_cost": 0,
+                        "water_cost": 0,
+                        "elec_extra": 0,
+                        "water_extra": 0,
+                        "total_extra": 0,
+                        "allowance": prop.get("allowance", 50),
+                        "monthly_breakdown": {}
+                    }
+                
+                # Add this month's data
+                monthly_data = {
                     "elec_cost": prop.get("total_electricity_cost", 0),
                     "water_cost": prop.get("total_water_cost", 0),
-                    "elec_extra": 0,  # No individual elec extra in new system
-                    "water_extra": 0,  # No individual water extra in new system
-                    "total_extra": prop.get("overuse", 0),
-                    "allowance": prop.get("allowance", 50)
+                    "total_cost": prop.get("total_electricity_cost", 0) + prop.get("total_water_cost", 0),
+                    "overuse": max(0, (prop.get("total_electricity_cost", 0) + prop.get("total_water_cost", 0)) - prop.get("allowance", 50))
                 }
-                for prop in result.get("properties", [])
-                if "error" not in prop
-            ],
+                
+                combined_properties[prop_name]["monthly_breakdown"][month] = monthly_data
+                
+                # Add to totals
+                combined_properties[prop_name]["elec_cost"] += monthly_data["elec_cost"]
+                combined_properties[prop_name]["water_cost"] += monthly_data["water_cost"]
+                combined_properties[prop_name]["total_extra"] += monthly_data["overuse"]
+        
+        # Convert to final format
+        final_properties = []
+        total_elec_cost = 0
+        total_water_cost = 0
+        total_extra = 0
+        properties_with_overages = 0
+        
+        for prop_data in combined_properties.values():
+            final_properties.append(prop_data)
+            total_elec_cost += prop_data["elec_cost"]
+            total_water_cost += prop_data["water_cost"]
+            total_extra += prop_data["total_extra"]
+            
+            if prop_data["total_extra"] > 0:
+                properties_with_overages += 1
+        
+        # Create response data
+        response_data = {
+            "properties": final_properties,
             "summary": {
-                "total_properties": result.get("total_properties", 0),
-                "total_electricity_cost": sum(p.get("total_electricity_cost", 0) for p in result.get("properties", []) if "error" not in p),
-                "total_water_cost": sum(p.get("total_water_cost", 0) for p in result.get("properties", []) if "error" not in p),
-                "total_electricity_extra": 0,
-                "total_water_extra": 0,
-                "total_extra": result.get("total_overuse", 0),
-                "properties_with_overages": len([p for p in result.get("properties", []) if p.get("overuse", 0) > 0 and "error" not in p]),
+                "total_properties": len(final_properties),
+                "total_electricity_cost": total_elec_cost,
+                "total_water_cost": total_water_cost,
+                "total_electricity_extra": 0,  # Not calculated separately
+                "total_water_extra": 0,  # Not calculated separately
+                "total_extra": total_extra,
+                "properties_with_overages": properties_with_overages,
                 "calculation_date": datetime.now().isoformat(),
                 "allowance_system": "room-based",
-                "filter_applied": "first_10_properties"
+                "months_processed": months_to_process,
+                "calculation_method": "month-by-month"
             }
         }
         
+        print(f"✅ [API] Calculation completed: {len(final_properties)} properties, {properties_with_overages} with overages")
+        
         return CalculationResponse(
             success=True,
-            message="Legacy calculation completed successfully using Supabase",
-            data=legacy_data
+            message=f"Month-by-month calculation completed for {len(months_to_process)} months",
+            data=response_data
         )
         
     except Exception as e:
-        print(f"❌ [API] Legacy calculation failed: {e}")
+        print(f"❌ [API] Calculation failed: {e}")
         return CalculationResponse(
             success=False,
-            message="Legacy calculation failed",
+            message="Calculation failed",
             error=str(e)
         )
 
