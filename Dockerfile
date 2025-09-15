@@ -23,8 +23,8 @@ RUN apt-get update && apt-get install -y \
     libgobject-2.0-0 \
     libnspr4 \
     libnss3 \
-    libnssutil3 \
-    libsmime3 \
+    libnss3-dev \
+    libsmime3-dev \
     libgio-2.0-0 \
     libdbus-1-3 \
     libatk1.0-0 \
