@@ -17,14 +17,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Playwright and browsers
 RUN playwright install chromium
 
-# Install Playwright system dependencies manually (skip font packages that don't exist)
+# Install Playwright system dependencies manually (skip problematic packages)
 RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libgobject-2.0-0 \
     libnspr4 \
     libnss3 \
-    libnss3-dev \
-    libsmime3-dev \
     libgio-2.0-0 \
     libdbus-1-3 \
     libatk1.0-0 \
