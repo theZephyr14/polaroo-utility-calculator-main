@@ -205,6 +205,16 @@
                             </label>
                         </div>
                         
+                        <!-- Month Selection -->
+                        <div class="mb-3">
+                            <label for="startMonth" class="form-label">Start Month:</label>
+                            <input type="month" class="form-control" id="startMonth" value="2025-07">
+                        </div>
+                        <div class="mb-3">
+                            <label for="endMonth" class="form-label">End Month:</label>
+                            <input type="month" class="form-control" id="endMonth" value="2025-08">
+                        </div>
+                        
                         <button class="btn btn-success btn-calculate w-100 mt-3" onclick="calculateReport()">
                             <i class="fas fa-calculator me-2"></i>Calculate Monthly Report
                         </button>
@@ -384,6 +394,15 @@
             const loadingElement = document.getElementById('loadingOverview');
             const calculateBtn = document.querySelector('.btn-calculate');
             
+            // Get month selection
+            const startMonth = document.getElementById('startMonth').value;
+            const endMonth = document.getElementById('endMonth').value;
+            
+            if (!startMonth || !endMonth) {
+                showErrorMessage('Please select both start and end months');
+                return;
+            }
+            
             // Show loading state
             loadingElement.style.display = 'block';
             calculateBtn.disabled = true;
@@ -396,8 +415,8 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        month: new Date().getMonth() + 1,
-                        year: new Date().getFullYear()
+                        start_date: startMonth + '-01',
+                        end_date: endMonth + '-31'
                     })
                 });
                 
@@ -429,6 +448,15 @@
         async function processInvoices() {
             const loadingElement = document.getElementById('loadingOverview');
             const processBtn = document.querySelector('button[onclick="processInvoices()"]');
+            
+            // Get month selection
+            const startMonth = document.getElementById('startMonth').value;
+            const endMonth = document.getElementById('endMonth').value;
+            
+            if (!startMonth || !endMonth) {
+                showErrorMessage('Please select both start and end months');
+                return;
+            }
             
             // Show loading state
             loadingElement.style.display = 'block';
@@ -462,7 +490,11 @@
                             headers: {
                                 'Content-Type': 'application/json',
                             },
-                            body: JSON.stringify({ property_name: property })
+                            body: JSON.stringify({ 
+                                property_name: property,
+                                start_date: startMonth + '-01',
+                                end_date: endMonth + '-31'
+                            })
                         });
                         
                         if (!response.ok) {
@@ -601,10 +633,16 @@
         }
         
         function updateUI(data) {
-            // Update summary cards
-            document.getElementById('totalElecCost').textContent = `€${data.summary.total_electricity_cost.toFixed(2)}`;
-            document.getElementById('totalWaterCost').textContent = `€${data.summary.total_water_cost.toFixed(2)}`;
-            document.getElementById('totalExtra').textContent = `€${data.summary.total_extra.toFixed(2)}`;
+            // Check if we're calculating for 2 months (double the values)
+            const startMonth = document.getElementById('startMonth').value;
+            const endMonth = document.getElementById('endMonth').value;
+            const isTwoMonths = startMonth !== endMonth;
+            const multiplier = isTwoMonths ? 2 : 1;
+            
+            // Update summary cards (doubled for 2-month calculations)
+            document.getElementById('totalElecCost').textContent = `€${(data.summary.total_electricity_cost * multiplier).toFixed(2)}`;
+            document.getElementById('totalWaterCost').textContent = `€${(data.summary.total_water_cost * multiplier).toFixed(2)}`;
+            document.getElementById('totalExtra').textContent = `€${(data.summary.total_extra * multiplier).toFixed(2)}`;
             document.getElementById('totalProperties').textContent = data.summary.total_properties;
             
             // Populate overview table
@@ -612,19 +650,20 @@
             tbody.innerHTML = '';
             
             data.properties.forEach(property => {
-                const totalCost = property.elec_cost + property.water_cost;
-                const hasOverages = property.total_extra > 0;
+                const totalCost = (property.elec_cost + property.water_cost) * multiplier;
+                const totalExtra = property.total_extra * multiplier;
+                const hasOverages = totalExtra > 0;
                 
                 const row = document.createElement('tr');
                 if (hasOverages) row.className = 'overage-row';
                 
                 row.innerHTML = `
                     <td><strong>${property.name}</strong></td>
-                    <td><span class="badge bg-primary">€${property.allowance.toFixed(0)}</span></td>
-                    <td>€${property.elec_cost.toFixed(2)}</td>
-                    <td>€${property.water_cost.toFixed(2)}</td>
+                    <td><span class="badge bg-primary">€${(property.allowance * multiplier).toFixed(0)}</span></td>
+                    <td>€${(property.elec_cost * multiplier).toFixed(2)}</td>
+                    <td>€${(property.water_cost * multiplier).toFixed(2)}</td>
                     <td><strong>€${totalCost.toFixed(2)}</strong></td>
-                    <td class="${property.total_extra > 0 ? 'text-danger' : ''}"><strong>€${property.total_extra.toFixed(2)}</strong></td>
+                    <td class="${totalExtra > 0 ? 'text-danger' : ''}"><strong>€${totalExtra.toFixed(2)}</strong></td>
                 `;
                 
                 tbody.appendChild(row);
@@ -638,7 +677,13 @@
         }
         
         function updateOveragesTable(data) {
-            const overages = data.properties.filter(p => p.total_extra > 0);
+            // Check if we're calculating for 2 months (double the values)
+            const startMonth = document.getElementById('startMonth').value;
+            const endMonth = document.getElementById('endMonth').value;
+            const isTwoMonths = startMonth !== endMonth;
+            const multiplier = isTwoMonths ? 2 : 1;
+            
+            const overages = data.properties.filter(p => (p.total_extra * multiplier) > 0);
             const tbody = document.getElementById('overagesTableBody');
             tbody.innerHTML = '';
             
@@ -648,15 +693,16 @@
             }
             
             overages.forEach(property => {
-                const totalCost = property.elec_cost + property.water_cost;
+                const totalCost = (property.elec_cost + property.water_cost) * multiplier;
+                const totalExtra = property.total_extra * multiplier;
                 const row = document.createElement('tr');
                 row.className = 'overage-row';
                 
                 row.innerHTML = `
                     <td><strong>${property.name}</strong></td>
-                    <td><span class="badge bg-primary">€${property.allowance.toFixed(0)}</span></td>
+                    <td><span class="badge bg-primary">€${(property.allowance * multiplier).toFixed(0)}</span></td>
                     <td><strong>€${totalCost.toFixed(2)}</strong></td>
-                    <td class="text-danger"><strong>€${property.total_extra.toFixed(2)}</strong></td>
+                    <td class="text-danger"><strong>€${totalExtra.toFixed(2)}</strong></td>
                 `;
                 
                 tbody.appendChild(row);
