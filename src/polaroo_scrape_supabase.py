@@ -183,16 +183,29 @@ async def analyze_invoices_with_cohere(invoices: List[Dict[str, Any]],
         prompt = f"""
         Analyze these utility invoices for the period {start_date} to {end_date}.
         
+        IMPORTANT: This is a 2-MONTH period calculation. You need to find:
+        - 2 ELECTRICITY bills (one for each month)
+        - 1 WATER bill (covers both months, as water is billed every 2 months)
+        
         For each invoice, determine:
         1. Service type (electricity, water, gas)
         2. Whether it should be included in the calculation
         3. The amount in euros
+        4. The date range it covers
+        
+        SELECTION RULES:
+        - ELECTRICITY: Select exactly 2 bills (one per month in the period)
+        - WATER: Select exactly 1 bill that covers the entire 2-month period
+        - GAS: Ignore gas bills for this calculation
+        - Only select bills that fall within the date range {start_date} to {end_date}
         
         Return a JSON response with:
         {{
             "selected_electricity_rows": [list of row numbers for electricity bills],
             "selected_water_rows": [list of row numbers for water bills],
-            "reasoning": "explanation of selections",
+            "total_electricity_cost": sum of selected electricity bills,
+            "total_water_cost": sum of selected water bills,
+            "reasoning": "explanation of selections and date ranges",
             "missing_bills": "any missing bills for the period"
         }}
         

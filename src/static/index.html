@@ -511,23 +511,29 @@
             // Clear previous results
             clearInvoiceResults();
             
-            // List of first 10 properties
-            const properties = [
-                "Aribau 1º 1ª", "Aribau 1º 2ª", "Aribau 2º 1º", "Aribau 2º 2º", "Aribau 2º 3ª",
-                "Aribau 126-128 3-1", "Aribau 3º 2ª", "Aribau 4º 1ª", "Aribau 4º 1ª B", "Aribau 4º 2ª"
-            ];
-            
+            // Get all Book 1 properties from the API
             let results = [];
             let successful = 0;
             let failed = 0;
             
             try {
+                // Get all properties from API
+                const propertiesResponse = await fetch('/api/properties');
+                const propertiesData = await propertiesResponse.json();
+                
+                // Filter to only Book 1 (Aribau) properties
+                const properties = propertiesData.properties
+                    .filter(prop => prop.name.includes('Aribau'))
+                    .map(prop => prop.name);
+                
+                console.log(`📊 Processing ${properties.length} Book 1 properties`);
+                
                 // Process each property one by one
                 for (let i = 0; i < properties.length; i++) {
                     const property = properties[i];
                     
                     // Update progress
-                    processBtn.innerHTML = `<i class="fas fa-spinner fa-spin me-2"></i>Processing ${i+1}/10: ${property}`;
+                    processBtn.innerHTML = `<i class="fas fa-spinner fa-spin me-2"></i>Processing ${i+1}/${properties.length}: ${property}`;
                     
                     try {
                         const response = await fetch('/api/process-property', {

@@ -597,11 +597,41 @@ async def calculate_monthly_costs_only(property_names: List[str], start_date: st
                             results.append({"error": f"No invoice data found for: {property_name}"})
                             continue
                         
-                        # Filter invoices by date range
+                        # Filter invoices by date range using proper date fields
                         filtered_invoices = []
                         for invoice in invoices:
-                            invoice_date = invoice.get('date', '')
-                            if start_date <= invoice_date <= end_date:
+                            # Check both initial_date and final_date
+                            initial_date = invoice.get('initial_date', '')
+                            final_date = invoice.get('final_date', '')
+                            
+                            # Convert dates to YYYY-MM format for comparison
+                            from datetime import datetime
+                            try:
+                                invoice_month = None
+                                if initial_date:
+                                    # Parse initial_date (format: YYYY-MM-DD or DD/MM/YYYY)
+                                    if '/' in initial_date:
+                                        day, month, year = initial_date.split('/')
+                                        invoice_month = f"{year}-{month.zfill(2)}"
+                                    else:
+                                        invoice_month = initial_date[:7]  # YYYY-MM
+                                elif final_date:
+                                    # Parse final_date (format: YYYY-MM-DD or DD/MM/YYYY)
+                                    if '/' in final_date:
+                                        day, month, year = final_date.split('/')
+                                        invoice_month = f"{year}-{month.zfill(2)}"
+                                    else:
+                                        invoice_month = final_date[:7]  # YYYY-MM
+                                
+                                # Check if invoice month falls within our range
+                                if invoice_month and start_date[:7] <= invoice_month <= end_date[:7]:
+                                    filtered_invoices.append(invoice)
+                                    print(f"✅ [FILTER] Included invoice: {invoice.get('service', 'Unknown')} - {initial_date} to {final_date}")
+                                else:
+                                    print(f"❌ [FILTER] Excluded invoice: {invoice.get('service', 'Unknown')} - {initial_date} to {final_date}")
+                            except Exception as e:
+                                print(f"⚠️ [FILTER] Error parsing dates for invoice: {e}")
+                                # If we can't parse dates, include it to be safe
                                 filtered_invoices.append(invoice)
                         
                         if not filtered_invoices:
@@ -702,11 +732,41 @@ async def calculate_single_property_costs(property_name: str, start_date: str, e
                 if not invoices:
                     return {"error": f"No invoice data found for: {property_name}"}
                 
-                # Filter invoices by date range
+                # Filter invoices by date range using proper date fields
                 filtered_invoices = []
                 for invoice in invoices:
-                    invoice_date = invoice.get('date', '')
-                    if start_date <= invoice_date <= end_date:
+                    # Check both initial_date and final_date
+                    initial_date = invoice.get('initial_date', '')
+                    final_date = invoice.get('final_date', '')
+                    
+                    # Convert dates to YYYY-MM format for comparison
+                    from datetime import datetime
+                    try:
+                        invoice_month = None
+                        if initial_date:
+                            # Parse initial_date (format: YYYY-MM-DD or DD/MM/YYYY)
+                            if '/' in initial_date:
+                                day, month, year = initial_date.split('/')
+                                invoice_month = f"{year}-{month.zfill(2)}"
+                            else:
+                                invoice_month = initial_date[:7]  # YYYY-MM
+                        elif final_date:
+                            # Parse final_date (format: YYYY-MM-DD or DD/MM/YYYY)
+                            if '/' in final_date:
+                                day, month, year = final_date.split('/')
+                                invoice_month = f"{year}-{month.zfill(2)}"
+                            else:
+                                invoice_month = final_date[:7]  # YYYY-MM
+                        
+                        # Check if invoice month falls within our range
+                        if invoice_month and start_date[:7] <= invoice_month <= end_date[:7]:
+                            filtered_invoices.append(invoice)
+                            print(f"✅ [FILTER] Included invoice: {invoice.get('service', 'Unknown')} - {initial_date} to {final_date}")
+                        else:
+                            print(f"❌ [FILTER] Excluded invoice: {invoice.get('service', 'Unknown')} - {initial_date} to {final_date}")
+                    except Exception as e:
+                        print(f"⚠️ [FILTER] Error parsing dates for invoice: {e}")
+                        # If we can't parse dates, include it to be safe
                         filtered_invoices.append(invoice)
                 
                 if not filtered_invoices:
