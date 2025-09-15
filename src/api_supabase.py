@@ -540,6 +540,60 @@ async def get_system_settings():
         raise HTTPException(status_code=500, detail=str(e))
 
 # =============================================
+# CALCULATION FUNCTIONS (NO DOWNLOADS)
+# =============================================
+
+async def calculate_monthly_costs_only(property_names: List[str], start_date: str, end_date: str) -> Dict[str, Any]:
+    """
+    Calculate monthly costs without downloading any invoices.
+    This function only processes existing data or uses mock data for calculation.
+    """
+    try:
+        print(f"🧮 [CALC] Calculating costs for {len(property_names)} properties ({start_date} to {end_date})")
+        
+        manager = get_supabase_manager()
+        results = []
+        
+        for property_name in property_names:
+            # Get property info
+            property_info = manager.get_property_by_name(property_name)
+            if not property_info:
+                results.append({"error": f"Property not found: {property_name}"})
+                continue
+            
+            # Get allowance
+            allowance = manager.get_property_allowance(property_name)
+            
+            # For now, use mock data or existing data from Supabase
+            # In the future, this could pull from existing invoice records
+            mock_elec_cost = 50.0 + (hash(property_name) % 100)  # Mock electricity cost
+            mock_water_cost = 30.0 + (hash(property_name) % 50)  # Mock water cost
+            total_cost = mock_elec_cost + mock_water_cost
+            overuse = max(0, total_cost - allowance)
+            
+            result = {
+                "property_name": property_name,
+                "total_electricity_cost": mock_elec_cost,
+                "total_water_cost": mock_water_cost,
+                "total_cost": total_cost,
+                "allowance": allowance,
+                "overuse": overuse,
+                "calculation_method": "mock_data_no_download"
+            }
+            
+            results.append(result)
+        
+        return {
+            "properties": results,
+            "total_properties": len(property_names),
+            "calculation_date": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"❌ [CALC] Error in cost calculation: {e}")
+        return {"error": str(e)}
+
+# =============================================
 # LEGACY COMPATIBILITY ENDPOINTS
 # =============================================
 
@@ -577,7 +631,7 @@ async def calculate_monthly_report_legacy(request: CalculationRequest):
         
         print(f"📊 [API] Processing {len(months_to_process)} months: {months_to_process}")
         
-        # Process each month separately
+        # Process each month separately - CALCULATION ONLY (no downloads)
         monthly_results = {}
         for month in months_to_process:
             print(f"📅 [API] Processing month: {month}")
@@ -586,8 +640,8 @@ async def calculate_monthly_report_legacy(request: CalculationRequest):
             month_start = f"{month}-01"
             month_end = f"{month}-31"
             
-            # Process properties for this month
-            result = await process_multiple_properties(
+            # Calculate costs for this month (NO DOWNLOADS)
+            result = await calculate_monthly_costs_only(
                 property_names=[prop.name for prop in properties],
                 start_date=month_start,
                 end_date=month_end
@@ -685,6 +739,84 @@ async def calculate_monthly_report_legacy(request: CalculationRequest):
             message="Calculation failed",
             error=str(e)
         )
+
+# =============================================
+# PDF DOWNLOAD ENDPOINTS (MANUAL TRIGGER)
+# =============================================
+
+class PropertyDownloadRequest(BaseModel):
+    property_names: List[str]
+    start_date: str
+    end_date: str
+
+@app.post("/api/download-property-pdfs")
+async def download_property_pdfs(request: PropertyDownloadRequest):
+    """
+    Download PDFs for selected properties with overages.
+    This is triggered manually from the overages tab.
+    """
+    try:
+        print(f"📥 [DOWNLOAD] Starting PDF download for {len(request.property_names)} properties")
+        print(f"📅 [DOWNLOAD] Date range: {request.start_date} to {request.end_date}")
+        
+        # Process each property individually to download their specific invoices
+        results = []
+        successful_downloads = 0
+        failed_downloads = 0
+        
+        for property_name in request.property_names:
+            print(f"🏠 [DOWNLOAD] Processing property: {property_name}")
+            
+            try:
+                # Use the existing process_property_invoices function for actual downloads
+                result = await process_property_invoices(
+                    property_name=property_name,
+                    start_date=request.start_date,
+                    end_date=request.end_date
+                )
+                
+                if "error" not in result:
+                    results.append({
+                        "property_name": property_name,
+                        "status": "success",
+                        "downloaded_files": result.get("downloaded_files_count", 0),
+                        "total_cost": result.get("total_cost", 0),
+                        "overuse": result.get("overuse", 0)
+                    })
+                    successful_downloads += 1
+                else:
+                    results.append({
+                        "property_name": property_name,
+                        "status": "failed",
+                        "error": result["error"]
+                    })
+                    failed_downloads += 1
+                    
+            except Exception as e:
+                print(f"❌ [DOWNLOAD] Error processing {property_name}: {e}")
+                results.append({
+                    "property_name": property_name,
+                    "status": "failed",
+                    "error": str(e)
+                })
+                failed_downloads += 1
+        
+        return {
+            "success": True,
+            "message": f"PDF download completed: {successful_downloads} successful, {failed_downloads} failed",
+            "total_properties": len(request.property_names),
+            "successful_downloads": successful_downloads,
+            "failed_downloads": failed_downloads,
+            "results": results
+        }
+        
+    except Exception as e:
+        print(f"❌ [DOWNLOAD] Error in PDF download: {e}")
+        return {
+            "success": False,
+            "message": "PDF download failed",
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn

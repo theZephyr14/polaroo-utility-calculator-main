@@ -325,10 +325,41 @@
                         
                         <!-- Overages Tab -->
                         <div class="tab-pane fade" id="overages" role="tabpanel">
+                            <!-- Action Bar -->
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <div class="d-flex gap-2">
+                                        <button class="btn btn-outline-primary btn-sm" onclick="selectAllProperties()">
+                                            <i class="fas fa-check-square me-1"></i>Select All
+                                        </button>
+                                        <button class="btn btn-outline-secondary btn-sm" onclick="deselectAllProperties()">
+                                            <i class="fas fa-square me-1"></i>Deselect All
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="col-md-6 text-end">
+                                    <div class="d-flex gap-2 justify-content-end">
+                                        <button class="btn btn-success btn-sm" onclick="downloadSelectedPDFs()" id="downloadBtn" disabled>
+                                            <i class="fas fa-download me-1"></i>Get Data
+                                        </button>
+                                        <button class="btn btn-primary btn-sm" onclick="sendToERP()" id="erpBtn" disabled>
+                                            <i class="fas fa-paper-plane me-1"></i>Send to ERP
+                                        </button>
+                                        <button class="btn btn-info btn-sm" onclick="sendToHousemonk()" id="housemonkBtn" disabled>
+                                            <i class="fas fa-home me-1"></i>Send to Housemonk
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Properties Table -->
                             <div class="table-responsive">
                                 <table class="table table-hover">
                                     <thead>
                                         <tr>
+                                            <th width="50px">
+                                                <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()">
+                                            </th>
                                             <th>Property</th>
                                             <th>Allowance</th>
                                             <th>Total Cost</th>
@@ -337,10 +368,21 @@
                                     </thead>
                                     <tbody id="overagesTableBody">
                                         <tr>
-                                            <td colspan="4" class="text-center text-muted">No overages data available</td>
+                                            <td colspan="5" class="text-center text-muted">No overages data available</td>
                                         </tr>
                                     </tbody>
                                 </table>
+                            </div>
+                            
+                            <!-- Download Progress -->
+                            <div id="downloadProgress" class="mt-3" style="display: none;">
+                                <div class="alert alert-info">
+                                    <i class="fas fa-spinner fa-spin me-2"></i>
+                                    <span id="downloadStatus">Downloading PDFs...</span>
+                                </div>
+                                <div class="progress">
+                                    <div class="progress-bar" id="downloadProgressBar" role="progressbar" style="width: 0%"></div>
+                                </div>
                             </div>
                         </div>
                         
@@ -677,17 +719,21 @@
             tbody.innerHTML = '';
             
             if (overages.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-success">No overages found!</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-success">No overages found!</td></tr>';
                 return;
             }
             
-            overages.forEach(property => {
+            overages.forEach((property, index) => {
                 const totalCost = property.elec_cost + property.water_cost;
                 const totalExtra = property.total_extra;
                 const row = document.createElement('tr');
                 row.className = 'overage-row';
+                row.id = `property-row-${index}`;
                 
                 row.innerHTML = `
+                    <td>
+                        <input type="checkbox" class="property-checkbox" data-property="${property.name}" onchange="updateActionButtons()">
+                    </td>
                     <td><strong>${property.name}</strong></td>
                     <td><span class="badge bg-primary">€${property.allowance.toFixed(0)}</span></td>
                     <td><strong>€${totalCost.toFixed(2)}</strong></td>
@@ -696,6 +742,9 @@
                 
                 tbody.appendChild(row);
             });
+            
+            // Update action buttons state
+            updateActionButtons();
         }
         
         function updateCharts(data) {
@@ -806,6 +855,128 @@
             link.click();
             document.body.removeChild(link);
             URL.revokeObjectURL(url);
+        }
+        
+        // =============================================
+        // PROPERTY SELECTION AND DOWNLOAD FUNCTIONS
+        // =============================================
+        
+        function updateActionButtons() {
+            const selectedProperties = getSelectedProperties();
+            const hasSelection = selectedProperties.length > 0;
+            
+            document.getElementById('downloadBtn').disabled = !hasSelection;
+            document.getElementById('erpBtn').disabled = !hasSelection;
+            document.getElementById('housemonkBtn').disabled = !hasSelection;
+        }
+        
+        function getSelectedProperties() {
+            const checkboxes = document.querySelectorAll('.property-checkbox:checked');
+            return Array.from(checkboxes).map(cb => cb.dataset.property);
+        }
+        
+        function selectAllProperties() {
+            const checkboxes = document.querySelectorAll('.property-checkbox');
+            checkboxes.forEach(cb => cb.checked = true);
+            document.getElementById('selectAllCheckbox').checked = true;
+            updateActionButtons();
+        }
+        
+        function deselectAllProperties() {
+            const checkboxes = document.querySelectorAll('.property-checkbox');
+            checkboxes.forEach(cb => cb.checked = false);
+            document.getElementById('selectAllCheckbox').checked = false;
+            updateActionButtons();
+        }
+        
+        function toggleSelectAll() {
+            const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+            const checkboxes = document.querySelectorAll('.property-checkbox');
+            
+            checkboxes.forEach(cb => cb.checked = selectAllCheckbox.checked);
+            updateActionButtons();
+        }
+        
+        async function downloadSelectedPDFs() {
+            const selectedProperties = getSelectedProperties();
+            if (selectedProperties.length === 0) {
+                alert('Please select at least one property');
+                return;
+            }
+            
+            // Get month selection
+            const startMonth = document.getElementById('startMonth').value;
+            const endMonth = document.getElementById('endMonth').value;
+            
+            if (!startMonth || !endMonth) {
+                alert('Please select both start and end months');
+                return;
+            }
+            
+            // Show progress
+            const progressDiv = document.getElementById('downloadProgress');
+            const statusSpan = document.getElementById('downloadStatus');
+            const progressBar = document.getElementById('downloadProgressBar');
+            
+            progressDiv.style.display = 'block';
+            statusSpan.textContent = `Downloading PDFs for ${selectedProperties.length} properties...`;
+            progressBar.style.width = '0%';
+            
+            try {
+                const response = await fetch('/api/download-property-pdfs', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        property_names: selectedProperties,
+                        start_date: startMonth + '-01',
+                        end_date: endMonth + '-31'
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    statusSpan.textContent = `Download completed: ${result.successful_downloads} successful, ${result.failed_downloads} failed`;
+                    progressBar.style.width = '100%';
+                    progressBar.classList.add('bg-success');
+                    
+                    showSuccessMessage(`PDFs downloaded successfully! ${result.successful_downloads} properties processed.`);
+                } else {
+                    throw new Error(result.message || 'Download failed');
+                }
+                
+            } catch (error) {
+                console.error('Error downloading PDFs:', error);
+                statusSpan.textContent = `Download failed: ${error.message}`;
+                progressBar.classList.add('bg-danger');
+                showErrorMessage('Failed to download PDFs: ' + error.message);
+            }
+        }
+        
+        function sendToERP() {
+            const selectedProperties = getSelectedProperties();
+            if (selectedProperties.length === 0) {
+                alert('Please select at least one property');
+                return;
+            }
+            
+            alert(`Sending data for ${selectedProperties.length} properties to ERP...\n\nProperties: ${selectedProperties.join(', ')}\n\n(ERP integration not yet implemented)`);
+        }
+        
+        function sendToHousemonk() {
+            const selectedProperties = getSelectedProperties();
+            if (selectedProperties.length === 0) {
+                alert('Please select at least one property');
+                return;
+            }
+            
+            alert(`Sending data for ${selectedProperties.length} properties to Housemonk...\n\nProperties: ${selectedProperties.join(', ')}\n\n(Housemonk integration not yet implemented)`);
         }
     </script>
 </body>
