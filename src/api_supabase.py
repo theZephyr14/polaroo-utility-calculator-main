@@ -831,8 +831,8 @@ async def calculate_monthly_report_legacy(request: CalculationRequest):
         manager = get_supabase_manager()
         all_properties = manager.get_all_properties()
         
-        # Filter to Book 1 properties (you can define this criteria)
-        book1_properties = [prop for prop in all_properties if "Aribau" in prop.name]  # Adjust this filter as needed
+        # Book 1 properties = ALL properties in the system
+        book1_properties = all_properties
         
         print(f"📊 [API] Processing {len(book1_properties)} Book 1 properties")
         

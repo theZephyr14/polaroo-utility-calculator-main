@@ -521,9 +521,8 @@
                 const propertiesResponse = await fetch('/api/properties');
                 const propertiesData = await propertiesResponse.json();
                 
-                // Filter to only Book 1 (Aribau) properties
+                // Book 1 properties = ALL properties in the system
                 const properties = propertiesData.properties
-                    .filter(prop => prop.name.includes('Aribau'))
                     .map(prop => prop.name);
                 
                 console.log(`📊 Processing ${properties.length} Book 1 properties`);
