@@ -26,8 +26,7 @@ import pandas as pd
 import io
 
 from src.supabase_client import get_supabase_manager, ProcessingSession, PropertyResult
-from src.polaroo_scrape_supabase import process_property_invoices, process_multiple_properties
-from src.load_supabase import create_processing_session, update_processing_session
+# These imports are not used in the current implementation
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -555,7 +554,7 @@ async def calculate_monthly_costs_only(property_names: List[str], start_date: st
         results = []
         
         # Import the real scraping functions
-        from src.polaroo_scrape_supabase import _ensure_logged_in, _search_for_property, _get_invoice_table_data, _analyze_invoices_with_cohere
+        from src.polaroo_scrape_supabase import _ensure_logged_in, _search_for_property, _get_invoice_table_data, analyze_invoices_with_cohere
         
         # Launch browser once for all properties
         from playwright.async_api import async_playwright
