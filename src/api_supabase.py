@@ -545,43 +545,111 @@ async def get_system_settings():
 
 async def calculate_monthly_costs_only(property_names: List[str], start_date: str, end_date: str) -> Dict[str, Any]:
     """
-    Calculate monthly costs without downloading any invoices.
-    This function only processes existing data or uses mock data for calculation.
+    Calculate monthly costs by going to Polaroo, logging in, and getting real invoice data.
+    This function scrapes Polaroo for actual invoice data but doesn't download PDFs.
     """
     try:
-        print(f"🧮 [CALC] Calculating costs for {len(property_names)} properties ({start_date} to {end_date})")
+        print(f"🧮 [CALC] Getting real invoice data for {len(property_names)} properties ({start_date} to {end_date})")
         
         manager = get_supabase_manager()
         results = []
         
-        for property_name in property_names:
-            # Get property info
-            property_info = manager.get_property_by_name(property_name)
-            if not property_info:
-                results.append({"error": f"Property not found: {property_name}"})
-                continue
+        # Import the real scraping functions
+        from src.polaroo_scrape_supabase import _ensure_logged_in, _search_for_property, _get_invoice_table_data, _analyze_invoices_with_cohere
+        
+        # Launch browser once for all properties
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False)
+            context = await browser.new_context()
+            page = await context.new_page()
             
-            # Get allowance
-            allowance = manager.get_property_allowance(property_name)
-            
-            # For now, use mock data or existing data from Supabase
-            # In the future, this could pull from existing invoice records
-            mock_elec_cost = 50.0 + (hash(property_name) % 100)  # Mock electricity cost
-            mock_water_cost = 30.0 + (hash(property_name) % 50)  # Mock water cost
-            total_cost = mock_elec_cost + mock_water_cost
-            overuse = max(0, total_cost - allowance)
-            
-            result = {
-                "property_name": property_name,
-                "total_electricity_cost": mock_elec_cost,
-                "total_water_cost": mock_water_cost,
-                "total_cost": total_cost,
-                "allowance": allowance,
-                "overuse": overuse,
-                "calculation_method": "mock_data_no_download"
-            }
-            
-            results.append(result)
+            try:
+                # Login once
+                print("🔐 [CALC] Logging into Polaroo...")
+                if not await _ensure_logged_in(page):
+                    raise Exception("Failed to login to Polaroo")
+                
+                # Process each property
+                for i, property_name in enumerate(property_names):
+                    print(f"🏠 [CALC] Processing property {i+1}/{len(property_names)}: {property_name}")
+                    
+                    try:
+                        # Get property info
+                        property_info = manager.get_property_by_name(property_name)
+                        if not property_info:
+                            results.append({"error": f"Property not found: {property_name}"})
+                            continue
+                        
+                        # Get allowance
+                        allowance = manager.get_property_allowance(property_name)
+                        
+                        # Search for property in Polaroo
+                        if not await _search_for_property(page, property_name):
+                            print(f"❌ [CALC] Property not found in Polaroo: {property_name}")
+                            results.append({"error": f"Property not found in Polaroo: {property_name}"})
+                            continue
+                        
+                        # Get invoice data from table (no PDF downloads)
+                        invoices = await _get_invoice_table_data(page)
+                        if not invoices:
+                            print(f"❌ [CALC] No invoice data found for: {property_name}")
+                            results.append({"error": f"No invoice data found for: {property_name}"})
+                            continue
+                        
+                        # Filter invoices by date range
+                        filtered_invoices = []
+                        for invoice in invoices:
+                            invoice_date = invoice.get('date', '')
+                            if start_date <= invoice_date <= end_date:
+                                filtered_invoices.append(invoice)
+                        
+                        if not filtered_invoices:
+                            print(f"⚠️ [CALC] No invoices in date range for: {property_name}")
+                            results.append({
+                                "property_name": property_name,
+                                "total_electricity_cost": 0,
+                                "total_water_cost": 0,
+                                "total_cost": 0,
+                                "allowance": allowance,
+                                "overuse": 0,
+                                "calculation_method": "no_invoices_in_range"
+                            })
+                            continue
+                        
+                        # Analyze invoices with Cohere (get costs without downloading PDFs)
+                        analysis_result = await analyze_invoices_with_cohere(filtered_invoices, start_date, end_date)
+                        
+                        if "error" in analysis_result:
+                            results.append({"error": f"Analysis failed for {property_name}: {analysis_result['error']}"})
+                            continue
+                        
+                        # Calculate totals
+                        elec_cost = analysis_result.get('total_electricity_cost', 0)
+                        water_cost = analysis_result.get('total_water_cost', 0)
+                        total_cost = elec_cost + water_cost
+                        overuse = max(0, total_cost - allowance)
+                        
+                        result = {
+                            "property_name": property_name,
+                            "total_electricity_cost": elec_cost,
+                            "total_water_cost": water_cost,
+                            "total_cost": total_cost,
+                            "allowance": allowance,
+                            "overuse": overuse,
+                            "calculation_method": "real_polaroo_data",
+                            "invoices_analyzed": len(filtered_invoices)
+                        }
+                        
+                        results.append(result)
+                        print(f"✅ [CALC] {property_name}: €{total_cost:.2f} total, €{overuse:.2f} overuse")
+                        
+                    except Exception as e:
+                        print(f"❌ [CALC] Error processing {property_name}: {e}")
+                        results.append({"error": f"Error processing {property_name}: {str(e)}"})
+                
+            finally:
+                await browser.close()
         
         return {
             "properties": results,
@@ -591,6 +659,92 @@ async def calculate_monthly_costs_only(property_names: List[str], start_date: st
         
     except Exception as e:
         print(f"❌ [CALC] Error in cost calculation: {e}")
+        return {"error": str(e)}
+
+async def calculate_single_property_costs(property_name: str, start_date: str, end_date: str) -> Dict[str, Any]:
+    """
+    Calculate costs for a single property by going to Polaroo and getting real data.
+    """
+    try:
+        print(f"🏠 [SINGLE] Processing property: {property_name} ({start_date} to {end_date})")
+        
+        manager = get_supabase_manager()
+        
+        # Get property info
+        property_info = manager.get_property_by_name(property_name)
+        if not property_info:
+            return {"error": f"Property not found: {property_name}"}
+        
+        # Get allowance
+        allowance = manager.get_property_allowance(property_name)
+        
+        # Import the real scraping functions
+        from src.polaroo_scrape_supabase import _ensure_logged_in, _search_for_property, _get_invoice_table_data, analyze_invoices_with_cohere
+        
+        # Launch browser for this property
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False)
+            context = await browser.new_context()
+            page = await context.new_page()
+            
+            try:
+                # Login
+                if not await _ensure_logged_in(page):
+                    return {"error": "Failed to login to Polaroo"}
+                
+                # Search for property
+                if not await _search_for_property(page, property_name):
+                    return {"error": f"Property not found in Polaroo: {property_name}"}
+                
+                # Get invoice data
+                invoices = await _get_invoice_table_data(page)
+                if not invoices:
+                    return {"error": f"No invoice data found for: {property_name}"}
+                
+                # Filter invoices by date range
+                filtered_invoices = []
+                for invoice in invoices:
+                    invoice_date = invoice.get('date', '')
+                    if start_date <= invoice_date <= end_date:
+                        filtered_invoices.append(invoice)
+                
+                if not filtered_invoices:
+                    return {
+                        "name": property_name,
+                        "elec_cost": 0,
+                        "water_cost": 0,
+                        "total_extra": 0,
+                        "allowance": allowance,
+                        "error": "No invoices in date range"
+                    }
+                
+                # Analyze invoices with Cohere
+                analysis_result = await analyze_invoices_with_cohere(filtered_invoices, start_date, end_date)
+                
+                if "error" in analysis_result:
+                    return {"error": f"Analysis failed: {analysis_result['error']}"}
+                
+                # Calculate totals
+                elec_cost = analysis_result.get('total_electricity_cost', 0)
+                water_cost = analysis_result.get('total_water_cost', 0)
+                total_cost = elec_cost + water_cost
+                overuse = max(0, total_cost - allowance)
+                
+                return {
+                    "name": property_name,
+                    "elec_cost": elec_cost,
+                    "water_cost": water_cost,
+                    "total_extra": overuse,
+                    "allowance": allowance,
+                    "invoices_analyzed": len(filtered_invoices)
+                }
+                
+            finally:
+                await browser.close()
+        
+    except Exception as e:
+        print(f"❌ [SINGLE] Error processing {property_name}: {e}")
         return {"error": str(e)}
 
 # =============================================
@@ -613,98 +767,51 @@ async def calculate_monthly_report_legacy(request: CalculationRequest):
         start_date = datetime.strptime(request.start_date, "%Y-%m-%d")
         end_date = datetime.strptime(request.end_date, "%Y-%m-%d")
         
-        # Get all properties
+        # Get Book 1 properties only
         manager = get_supabase_manager()
-        properties = manager.get_all_properties()
+        all_properties = manager.get_all_properties()
         
-        # Generate list of months to process
-        months_to_process = []
-        current_date = start_date.replace(day=1)  # Start of month
+        # Filter to Book 1 properties (you can define this criteria)
+        book1_properties = [prop for prop in all_properties if "Aribau" in prop.name]  # Adjust this filter as needed
         
-        while current_date <= end_date:
-            months_to_process.append(current_date.strftime("%Y-%m"))
-            # Move to next month
-            if current_date.month == 12:
-                current_date = current_date.replace(year=current_date.year + 1, month=1)
-            else:
-                current_date = current_date.replace(month=current_date.month + 1)
+        print(f"📊 [API] Processing {len(book1_properties)} Book 1 properties")
         
-        print(f"📊 [API] Processing {len(months_to_process)} months: {months_to_process}")
-        
-        # Process each month separately - CALCULATION ONLY (no downloads)
-        monthly_results = {}
-        for month in months_to_process:
-            print(f"📅 [API] Processing month: {month}")
-            
-            # Get month start and end dates
-            month_start = f"{month}-01"
-            month_end = f"{month}-31"
-            
-            # Calculate costs for this month (NO DOWNLOADS)
-            result = await calculate_monthly_costs_only(
-                property_names=[prop.name for prop in properties],
-                start_date=month_start,
-                end_date=month_end
-            )
-            
-            if "error" not in result:
-                monthly_results[month] = result
-            else:
-                print(f"❌ [API] Error processing month {month}: {result['error']}")
-        
-        # Combine results month by month
-        combined_properties = {}
-        
-        for month, result in monthly_results.items():
-            for prop in result.get("properties", []):
-                if "error" in prop:
-                    continue
-                    
-                prop_name = prop["property_name"]
-                
-                if prop_name not in combined_properties:
-                    # Initialize property data
-                    combined_properties[prop_name] = {
-                        "name": prop_name,
-                        "elec_cost": 0,
-                        "water_cost": 0,
-                        "elec_extra": 0,
-                        "water_extra": 0,
-                        "total_extra": 0,
-                        "allowance": prop.get("allowance", 50),
-                        "monthly_breakdown": {}
-                    }
-                
-                # Add this month's data
-                monthly_data = {
-                    "elec_cost": prop.get("total_electricity_cost", 0),
-                    "water_cost": prop.get("total_water_cost", 0),
-                    "total_cost": prop.get("total_electricity_cost", 0) + prop.get("total_water_cost", 0),
-                    "overuse": max(0, (prop.get("total_electricity_cost", 0) + prop.get("total_water_cost", 0)) - prop.get("allowance", 50))
-                }
-                
-                combined_properties[prop_name]["monthly_breakdown"][month] = monthly_data
-                
-                # Add to totals
-                combined_properties[prop_name]["elec_cost"] += monthly_data["elec_cost"]
-                combined_properties[prop_name]["water_cost"] += monthly_data["water_cost"]
-                combined_properties[prop_name]["total_extra"] += monthly_data["overuse"]
-        
-        # Convert to final format
+        # Process each property one by one
         final_properties = []
         total_elec_cost = 0
         total_water_cost = 0
         total_extra = 0
         properties_with_overages = 0
         
-        for prop_data in combined_properties.values():
-            final_properties.append(prop_data)
-            total_elec_cost += prop_data["elec_cost"]
-            total_water_cost += prop_data["water_cost"]
-            total_extra += prop_data["total_extra"]
+        for i, property in enumerate(book1_properties):
+            print(f"🏠 [API] Processing property {i+1}/{len(book1_properties)}: {property.name}")
             
-            if prop_data["total_extra"] > 0:
-                properties_with_overages += 1
+            # Process this single property for the entire date range
+            result = await calculate_single_property_costs(
+                property_name=property.name,
+                start_date=request.start_date,
+                end_date=request.end_date
+            )
+            
+            if "error" not in result:
+                final_properties.append(result)
+                total_elec_cost += result["elec_cost"]
+                total_water_cost += result["water_cost"]
+                total_extra += result["total_extra"]
+                
+                if result["total_extra"] > 0:
+                    properties_with_overages += 1
+            else:
+                print(f"❌ [API] Error processing {property.name}: {result['error']}")
+                # Add error property to results
+                final_properties.append({
+                    "name": property.name,
+                    "elec_cost": 0,
+                    "water_cost": 0,
+                    "total_extra": 0,
+                    "allowance": 50,
+                    "error": result["error"]
+                })
         
         # Create response data
         response_data = {

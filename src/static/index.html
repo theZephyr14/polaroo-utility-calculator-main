@@ -445,10 +445,13 @@
                 return;
             }
             
-            // Show loading state
+            // Show loading state with progress
             loadingElement.style.display = 'block';
             calculateBtn.disabled = true;
-            calculateBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Calculating...';
+            calculateBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Connecting to Polaroo...';
+            
+            // Clear previous results
+            document.getElementById('overviewTableBody').innerHTML = '<tr><td colspan="6" class="text-center text-muted">Processing properties...</td></tr>';
             
             try {
                 const response = await fetch('/api/calculate', {
@@ -471,7 +474,7 @@
                 if (result.success) {
                     currentData = result.data;
                     updateUI(result.data);
-                    showSuccessMessage('Report calculated successfully!');
+                    showSuccessMessage(`Report calculated successfully! Processed ${result.data.properties.length} properties.`);
                 } else {
                     throw new Error(result.error || 'Calculation failed');
                 }
