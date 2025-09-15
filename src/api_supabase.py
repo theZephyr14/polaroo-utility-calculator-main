@@ -826,6 +826,21 @@ async def calculate_monthly_report_legacy(request: CalculationRequest):
         start_date = datetime.strptime(request.start_date, "%Y-%m-%d")
         end_date = datetime.strptime(request.end_date, "%Y-%m-%d")
         
+        # Calculate months to process
+        months_to_process = []
+        current_date = start_date.replace(day=1)  # Start from first day of month
+        end_month = end_date.replace(day=1)
+        
+        while current_date <= end_month:
+            months_to_process.append(current_date.strftime("%Y-%m"))
+            # Move to next month
+            if current_date.month == 12:
+                current_date = current_date.replace(year=current_date.year + 1, month=1)
+            else:
+                current_date = current_date.replace(month=current_date.month + 1)
+        
+        print(f"📅 [API] Processing months: {months_to_process}")
+        
         # Get Book 1 properties only
         manager = get_supabase_manager()
         all_properties = manager.get_all_properties()

@@ -402,7 +402,9 @@ async def process_property_invoices(property_name: str, start_date: str = None,
                     raise Exception("No invoice data found")
                 
                 # Analyze with Cohere
-                analysis = await analyze_invoices_with_cohere(invoices, start_date or "2025-01", end_date or "2025-12")
+                if not start_date or not end_date:
+                    raise Exception("Start date and end date are required")
+                analysis = await analyze_invoices_with_cohere(invoices, start_date, end_date)
                 
                 # Calculate costs
                 total_electricity = 0.0
@@ -540,8 +542,8 @@ async def process_multiple_properties(property_names: List[str], start_date: str
 # Legacy compatibility functions
 async def get_user_month_selection() -> Tuple[str, str]:
     """Get user month selection (legacy compatibility)."""
-    # This would normally prompt the user, but for now return defaults
-    return "2025-05", "2025-06"
+    # This function should not be used in the new implementation
+    raise Exception("get_user_month_selection should not be called in the new implementation")
 
 async def process_first_10_properties() -> List[Dict[str, Any]]:
     """Process the first 10 properties (legacy compatibility)."""
